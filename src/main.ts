@@ -1,7 +1,13 @@
+import { LandLoader } from "./land/loader";
+import type { LandMesh } from "./land/mesh";
+
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
 const coordsEl = document.getElementById("coords") as HTMLDivElement;
 const gl = canvas.getContext("webgl");
 if (!gl) throw new Error("WebGL not supported");
+
+const uint32Ext = gl.getExtension("OES_element_index_uint");
+if (!uint32Ext) console.warn("OES_element_index_uint missing — large land meshes may fail");
 
 // WGS84 ellipsoid (meters), Z = north pole
 const WGS84_A = 6378137.0;
@@ -34,6 +40,7 @@ varying vec3 vNormal;
 varying vec3 vWorldPos;
 uniform vec3 uLightPos;
 uniform vec3 uCameraPos;
+uniform vec3 uBaseColor;
 
 void main() {
   vec3 n = normalize(vNormal);
@@ -45,8 +52,7 @@ void main() {
   float spec = pow(max(dot(n, h), 0.0), 32.0);
   float ambient = 0.18;
 
-  vec3 base = vec3(0.25, 0.55, 0.95);
-  vec3 color = base * (ambient + diff * 0.85) + vec3(1.0) * spec * 0.35;
+  vec3 color = uBaseColor * (ambient + diff * 0.85) + vec3(1.0) * spec * 0.25;
   gl_FragColor = vec4(color, 1.0);
 }
 `;
@@ -92,14 +98,12 @@ function createEllipsoid(latBands: number, longBands: number) {
       const sinP = Math.sin(phi);
       const cosP = Math.cos(phi);
 
-      // theta=0 at +Z (north pole)
       const x = WGS84_A * sinT * cosP;
       const y = WGS84_A * sinT * sinP;
       const z = WGS84_B * cosT;
 
       positions.push(x, y, z);
 
-      // Ellipsoid surface normal ∝ (x/a², y/a², z/b²)
       const nx = x / a2;
       const ny = y / a2;
       const nz = z / b2;
@@ -124,7 +128,6 @@ function createEllipsoid(latBands: number, longBands: number) {
   };
 }
 
-/** Geocentric radius of WGS84 surface in unit direction (dx,dy,dz). */
 function ellipsoidRadius(dx: number, dy: number, dz: number): number {
   const len = Math.hypot(dx, dy, dz) || 1;
   const ux = dx / len;
@@ -133,7 +136,6 @@ function ellipsoidRadius(dx: number, dy: number, dz: number): number {
   return 1 / Math.sqrt((ux * ux + uy * uy) / (WGS84_A * WGS84_A) + (uz * uz) / (WGS84_B * WGS84_B));
 }
 
-/** ECEF (Z-up) → geodetic lat/lon (deg) and ellipsoidal height (m). */
 function ecefToGeodetic(x: number, y: number, z: number) {
   const lon = Math.atan2(y, x);
   const p = Math.hypot(x, y);
@@ -239,12 +241,31 @@ const idxBuf = gl.createBuffer()!;
 gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
 gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ellipsoid.indices, gl.STATIC_DRAW);
 
+const landPosBuf = gl.createBuffer()!;
+const landNrmBuf = gl.createBuffer()!;
+const landIdxBuf = gl.createBuffer()!;
+let landIndexCount = 0;
+let landLod = -1;
+let landFeatureCount = 0;
+
+function uploadLandMesh(mesh: LandMesh) {
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, landPosBuf);
+  gl!.bufferData(gl!.ARRAY_BUFFER, mesh.positions, gl!.STATIC_DRAW);
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, landNrmBuf);
+  gl!.bufferData(gl!.ARRAY_BUFFER, mesh.normals, gl!.STATIC_DRAW);
+  gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, landIdxBuf);
+  gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, mesh.indices, gl!.STATIC_DRAW);
+  landIndexCount = mesh.indices.length;
+  landFeatureCount = mesh.featureCount;
+}
+
 const aPosition = gl.getAttribLocation(program, "aPosition");
 const aNormal = gl.getAttribLocation(program, "aNormal");
 const uMVP = gl.getUniformLocation(program, "uMVP");
 const uModel = gl.getUniformLocation(program, "uModel");
 const uLightPos = gl.getUniformLocation(program, "uLightPos");
 const uCameraPos = gl.getUniformLocation(program, "uCameraPos");
+const uBaseColor = gl.getUniformLocation(program, "uBaseColor");
 
 let yaw = 0.6;
 let pitch = 0.35;
@@ -266,7 +287,6 @@ canvas.addEventListener("pointerup", () => {
 
 const FOVY = (45 * Math.PI) / 180;
 
-/** Radians of orbit per screen pixel — scales with height so drag tracks the surface. */
 function orbitRadiansPerPixel(): number {
   const h = Math.max(canvas.clientHeight, 1);
   const metersPerPixel = (2 * height * Math.tan(FOVY / 2)) / h;
@@ -275,7 +295,6 @@ function orbitRadiansPerPixel(): number {
   return metersPerPixel / R;
 }
 
-/** Zoom exp gain: stronger far out, gentler near the surface. */
 function zoomGain(): number {
   const t = Math.log(height / MIN_HEIGHT) / Math.log(MAX_HEIGHT / MIN_HEIGHT);
   return 0.00045 + t * 0.0014;
@@ -313,7 +332,6 @@ function resize() {
   }
 }
 
-/** Unit direction from earth center toward camera (Z = north). */
 function viewDir(): number[] {
   const cp = Math.cos(pitch);
   return [cp * Math.sin(yaw), cp * Math.cos(yaw), Math.sin(pitch)];
@@ -326,7 +344,6 @@ function cameraPos(): number[] {
   return [dx * r, dy * r, dz * r];
 }
 
-/** Surface point the camera looks at (ray toward origin ∩ ellipsoid). */
 function lookAtSurfacePoint(): number[] {
   const [dx, dy, dz] = viewDir();
   const R = ellipsoidRadius(dx, dy, dz);
@@ -337,15 +354,75 @@ function fmt(n: number, digits: number): string {
   return n.toFixed(digits);
 }
 
+const landLoader = new LandLoader("/api");
+let landStatus = "loading…";
+let landLoadTimer = 0;
+let lastLoadLon = NaN;
+let lastLoadLat = NaN;
+let lastLoadH = NaN;
+
+function scheduleLandLoad(lon: number, lat: number, h: number) {
+  const moved =
+    Math.abs(lon - lastLoadLon) > 1.5 ||
+    Math.abs(lat - lastLoadLat) > 1.5 ||
+    Math.abs(Math.log(h) - Math.log(lastLoadH || h)) > 0.15 ||
+    Number.isNaN(lastLoadLon);
+  if (!moved && landIndexCount > 0) return;
+
+  window.clearTimeout(landLoadTimer);
+  landLoadTimer = window.setTimeout(async () => {
+    lastLoadLon = lon;
+    lastLoadLat = lat;
+    lastLoadH = h;
+    landStatus = "fetching…";
+    const result = await landLoader.loadForView(lon, lat, h);
+    if (!result) {
+      if (landIndexCount === 0) landStatus = "API offline (run npm run server)";
+      return;
+    }
+    uploadLandMesh(result.mesh);
+    landLod = result.lod;
+    landStatus = `lod${result.lod} · ${result.count} feats · ${result.mesh.triangleCount} tris`;
+  }, 180);
+}
+
 function updateCoords(surface: number[], eye: number[]) {
   const g = ecefToGeodetic(surface[0], surface[1], surface[2]);
-  const camH = height;
   coordsEl.innerHTML =
-    `<div><b>Look-at (WGS84 surface)</b></div>` +
+    `<div><b>Look-at (WGS84 / EPSG:4326)</b></div>` +
     `<div>lat ${fmt(g.lat, 6)}° · lon ${fmt(g.lon, 6)}°</div>` +
     `<div>ECEF ${fmt(surface[0], 1)}, ${fmt(surface[1], 1)}, ${fmt(surface[2], 1)} m</div>` +
-    `<div>camera height ${fmt(camH, 1)} m</div>` +
-    `<div>camera ECEF ${fmt(eye[0], 1)}, ${fmt(eye[1], 1)}, ${fmt(eye[2], 1)} m</div>`;
+    `<div>camera height ${fmt(height, 1)} m</div>` +
+    `<div>land ${landStatus}</div>`;
+  scheduleLandLoad(g.lon, g.lat, height);
+}
+
+function drawMesh(
+  pos: WebGLBuffer,
+  nrm: WebGLBuffer,
+  idx: WebGLBuffer,
+  indexCount: number,
+  indexType: number,
+  color: [number, number, number],
+  mvp: Mat4,
+  model: Mat4,
+  eye: number[]
+) {
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, pos);
+  gl!.enableVertexAttribArray(aPosition);
+  gl!.vertexAttribPointer(aPosition, 3, gl!.FLOAT, false, 0, 0);
+
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, nrm);
+  gl!.enableVertexAttribArray(aNormal);
+  gl!.vertexAttribPointer(aNormal, 3, gl!.FLOAT, false, 0, 0);
+
+  gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, idx);
+  gl!.uniformMatrix4fv(uMVP, false, mvp);
+  gl!.uniformMatrix4fv(uModel, false, model);
+  gl!.uniform3f(uLightPos, WGS84_A * 2, WGS84_A * 1.5, WGS84_A * 3);
+  gl!.uniform3f(uCameraPos, eye[0], eye[1], eye[2]);
+  gl!.uniform3f(uBaseColor, color[0], color[1], color[2]);
+  gl!.drawElements(gl!.TRIANGLES, indexCount, indexType, 0);
 }
 
 function frame() {
@@ -359,7 +436,6 @@ function frame() {
   const far = height + WGS84_A * 4;
   const proj = mat4Perspective(FOVY, aspect, near, far);
 
-  // Stable up near poles: blend world Z with a yaw-based tangent
   const up: number[] = Math.abs(pitch) > 1.2 ? [-Math.sin(yaw), -Math.cos(yaw), 0] : [0, 0, 1];
   const view = mat4LookAt(eye, [0, 0, 0], up);
   const model = mat4Identity();
@@ -368,23 +444,40 @@ function frame() {
   gl!.clearColor(0.04, 0.06, 0.09, 1);
   gl!.clear(gl!.COLOR_BUFFER_BIT | gl!.DEPTH_BUFFER_BIT);
   gl!.enable(gl!.DEPTH_TEST);
+  gl!.enable(gl!.CULL_FACE);
+  gl!.cullFace(gl!.BACK);
   gl!.useProgram(program);
 
-  gl!.bindBuffer(gl!.ARRAY_BUFFER, posBuf);
-  gl!.enableVertexAttribArray(aPosition);
-  gl!.vertexAttribPointer(aPosition, 3, gl!.FLOAT, false, 0, 0);
+  // Ocean ellipsoid
+  drawMesh(
+    posBuf,
+    nrmBuf,
+    idxBuf,
+    ellipsoid.indices.length,
+    gl!.UNSIGNED_SHORT,
+    [0.25, 0.55, 0.95],
+    mvp,
+    model,
+    eye
+  );
 
-  gl!.bindBuffer(gl!.ARRAY_BUFFER, nrmBuf);
-  gl!.enableVertexAttribArray(aNormal);
-  gl!.vertexAttribPointer(aNormal, 3, gl!.FLOAT, false, 0, 0);
+  // Land polygons (EPSG:4326 → ECEF)
+  if (landIndexCount > 0) {
+    gl!.disable(gl!.CULL_FACE); // mixed winding after projection
+    drawMesh(
+      landPosBuf,
+      landNrmBuf,
+      landIdxBuf,
+      landIndexCount,
+      gl!.UNSIGNED_INT,
+      [0.28, 0.62, 0.32],
+      mvp,
+      model,
+      eye
+    );
+    gl!.enable(gl!.CULL_FACE);
+  }
 
-  gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, idxBuf);
-  gl!.uniformMatrix4fv(uMVP, false, mvp);
-  gl!.uniformMatrix4fv(uModel, false, model);
-  gl!.uniform3f(uLightPos, WGS84_A * 2, WGS84_A * 1.5, WGS84_A * 3);
-  gl!.uniform3f(uCameraPos, eye[0], eye[1], eye[2]);
-
-  gl!.drawElements(gl!.TRIANGLES, ellipsoid.indices.length, gl!.UNSIGNED_SHORT, 0);
   requestAnimationFrame(frame);
 }
 

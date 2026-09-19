@@ -66,3 +66,6 @@ $RECYCLE.BIN/
 *.temp
 tmp/
 temp/
+
+#External heavy data
+public/data
