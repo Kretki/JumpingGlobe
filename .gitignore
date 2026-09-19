@@ -66,3 +66,6 @@ $RECYCLE.BIN/
 *.temp
 tmp/
 temp/
+
+# Big data files
+public/data
