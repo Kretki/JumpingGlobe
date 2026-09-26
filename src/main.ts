@@ -337,7 +337,7 @@ canvas.addEventListener("pointermove", (e) => {
   lastX = e.clientX;
   lastY = e.clientY;
   const k = orbitRadiansPerPixel();
-  yaw -= dx * k;
+  yaw += dx * k;
   pitch = Math.max(-1.4, Math.min(1.4, pitch + dy * k));
 });
 

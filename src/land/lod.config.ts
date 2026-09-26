@@ -1,19 +1,26 @@
+import lodJson from "../../lod.json";
+
 export type LandLod = 0 | 1 | 2;
 
 export type LodHeightBand = {
   file: string;
   fromHeightM: number;
+  orderNum: number;
 };
 
-export const WORLD_FILE = "land_lod0.gpkg";
+export const WORLD_FILE = lodJson.worldFile;
 
 export const WORLD_BBOX = { west: -180, south: -85, east: 180, north: 85 };
 
-export const LOD_HEIGHT_BANDS: LodHeightBand[] = [
-  { file: WORLD_FILE, fromHeightM: 4_000_000 },
-  { file: "land_lod1.gpkg", fromHeightM: 2_000_000 },
-  { file: "land_lod2.gpkg", fromHeightM: 1_000_000 },
-];
+const fileByOrderNum = new Map<number, string>(
+  lodJson.bands.map((b) => [b.orderNum, b.file])
+);
+
+export const LOD_HEIGHT_BANDS: LodHeightBand[] = lodJson.fromHeightM.flatMap((h) => {
+  const file = fileByOrderNum.get(h.orderNum);
+  if (!file) return [];
+  return [{ file, fromHeightM: h.height, orderNum: h.orderNum }];
+});
 
 function bandAtHeight(heightM: number): LodHeightBand | undefined {
   const bands = [...LOD_HEIGHT_BANDS].sort((a, b) => b.fromHeightM - a.fromHeightM);
@@ -32,16 +39,17 @@ export function isWorldLod(heightM: number): boolean {
 }
 
 export function meshLodFromFile(file: string): LandLod {
+  const byName = LOD_HEIGHT_BANDS.find((b) => b.file === file);
+  if (byName) {
+    const n = byName.orderNum;
+    if (n === 0 || n === 1 || n === 2) return n;
+  }
   const m = /lod(\d+)/i.exec(file);
   if (m) {
     const n = Number(m[1]);
     if (n === 0 || n === 1 || n === 2) return n;
   }
-  const bands = [...LOD_HEIGHT_BANDS].sort((a, b) => b.fromHeightM - a.fromHeightM);
-  const i = bands.findIndex((b) => b.file === file);
-  if (i <= 0) return 0;
-  if (i === 1) return 1;
-  return 2;
+  return 0;
 }
 
 export function lodFromHeight(heightM: number): LandLod {

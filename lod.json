@@ -1,0 +1,15 @@
+{
+  "dataDir": "public/data/Ma_0",
+  "worldFile": "land_lod0.gpkg",
+  "fullResolutionFile": "land_polygons.gpkg",
+  "bands": [
+    { "file": "land_lod0.gpkg", "orderNum": 0 },
+    { "file": "land_lod1.gpkg", "orderNum": 1 },
+    { "file": "land_lod2.gpkg", "orderNum": 2 }
+  ],
+  "fromHeightM": [
+    { "orderNum": 0, "height": 4000000 },
+    { "orderNum": 1, "height": 2000000 },
+    { "orderNum": 2, "height": 1000000 }
+  ]
+}

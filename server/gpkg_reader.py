@@ -143,7 +143,7 @@ class LandGpkgStore:
         self._local = threading.local()
 
     def resolve_file(self, name: str) -> Path:
-        if not name or name != Path(name).name:
+        if not name or Path(name).is_absolute() or ".." in Path(name).parts:
             raise ValueError("invalid file name")
         if not name.endswith(".gpkg"):
             raise ValueError("file must be a .gpkg")
@@ -160,10 +160,15 @@ class LandGpkgStore:
     def available_lods(self) -> list[str]:
         if not self.data_dir.is_dir():
             return []
+        try:
+            from server.lod_config import FULL_RESOLUTION_FILE
+        except ImportError:
+            from lod_config import FULL_RESOLUTION_FILE
+        skip = Path(FULL_RESOLUTION_FILE).name
         return sorted(
             p.name
             for p in self.data_dir.glob("*.gpkg")
-            if p.is_file() and p.name != "land_polygons.gpkg"
+            if p.is_file() and p.name != skip
         )
 
     def _conn(self, name: str) -> sqlite3.Connection:

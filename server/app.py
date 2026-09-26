@@ -6,7 +6,7 @@ never loads the full multi-hundred-MB (or 1.5 GiB) datasets.
 
   GET /api/health
   GET /api/land/stats
-  GET /api/land?file=land_lod0.gpkg&bbox=west,south,east,north&limit=25000&min_area=0
+  GET /api/land?file=<worldFile from lod.json>&bbox=west,south,east,north&limit=25000&min_area=0
 
 Run:
   uvicorn server.app:app --reload --port 8765
@@ -14,18 +14,15 @@ Run:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from server.gpkg_reader import LandGpkgStore
+    from server.lod_config import DATA_DIR, FULL_RESOLUTION_FILE, ROOT, WORLD_FILE
 except ImportError:  # running as `python app.py` inside server/
     from gpkg_reader import LandGpkgStore
-
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "public" / "data"
+    from lod_config import DATA_DIR, FULL_RESOLUTION_FILE, ROOT, WORLD_FILE
 
 store = LandGpkgStore(DATA_DIR)
 
@@ -51,7 +48,7 @@ def land_stats() -> dict:
             lods[name] = store.stats(name)
         except OSError as exc:
             lods[name] = {"error": str(exc)}
-    full = DATA_DIR / "land_polygons.gpkg"
+    full = DATA_DIR / FULL_RESOLUTION_FILE
     return {
         "lods": lods,
         "full_resolution": {
@@ -65,7 +62,7 @@ def land_stats() -> dict:
 
 @app.get("/api/land")
 def land(
-    file: str = Query("land_lod0.gpkg", description="GPKG filename in public/data"),
+    file: str = Query(WORLD_FILE, description="GPKG filename under lod.json dataDir"),
     bbox: str = Query(
         ...,
         description="west,south,east,north in EPSG:4326 degrees (west>east = antimeridian wrap)",
