@@ -6,11 +6,21 @@ import {
   WORLD_BBOX,
   WORLD_FILE,
   lodFileFromHeight,
+  maxSpanFromHeight,
   meshLodFromFile,
+  meshLodFromHeight,
   type LandLod,
 } from "./lod.config";
 
-export { lodFileFromHeight, lodFromHeight, meshLodFromFile, WORLD_FILE, WORLD_BBOX } from "./lod.config";
+export {
+  lodFileFromHeight,
+  lodFromHeight,
+  maxSpanFromHeight,
+  meshLodFromFile,
+  meshLodFromHeight,
+  WORLD_FILE,
+  WORLD_BBOX,
+} from "./lod.config";
 export type { LandLod, LodHeightBand } from "./lod.config";
 
 export type BBox = { west: number; south: number; east: number; north: number };
@@ -47,9 +57,9 @@ export function minAreaFromHeight(heightM: number): number {
 }
 
 export function featureLimitFromHeight(heightM: number): number {
-  if (heightM > 3_000_000) return 8_000;
-  if (heightM > 1_000_000) return 12_000;
-  return 15_000;
+  if (heightM > 3_000_000) return 4_000;
+  if (heightM > 1_000_000) return 5_000;
+  return 6_000;
 }
 
 export function viewBBox(
@@ -57,7 +67,7 @@ export function viewBBox(
   latDeg: number,
   heightM: number,
   padScale = 1.35,
-  maxSpanDeg = 80
+  maxSpanDeg = maxSpanFromHeight(heightM)
 ): BBox {
   const R = 6_371_000;
   const ang = Math.acos(clamp(R / (R + Math.max(heightM, 1)), -1, 1));
@@ -316,6 +326,7 @@ export class LandLoader {
       minArea,
       limit,
       key,
+      heightM,
     });
   }
 
@@ -325,11 +336,20 @@ export class LandLoader {
       this.inflightView.abort();
       this.inflightView = null;
     }
+    let worldPending = false;
     for (const [s, p] of this.pendingMesh) {
       if (p.kind === "view") {
         p.resolve(null);
         this.pendingMesh.delete(s);
+      } else {
+        worldPending = true;
       }
+    }
+    if (!worldPending && this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+      this.workerReady = false;
+      this.initWorker();
     }
     this.emit({ percent: 0, phase: "idle", label: "Idle" });
   }
@@ -367,6 +387,7 @@ export class LandLoader {
     minArea: number;
     limit: number;
     key?: string;
+    heightM?: number;
   }): Promise<LandLoadResult | null> {
     const file = opts.file;
     const bbox = opts.bbox;
@@ -419,21 +440,36 @@ export class LandLoader {
       });
 
       if (this.worker && this.workerReady) {
-        return await this.meshInWorker(kind, mySeq, key, lod, file, fc, count, bbox);
+        return await this.meshInWorker(
+          kind,
+          mySeq,
+          key,
+          lod,
+          file,
+          fc,
+          count,
+          bbox,
+          opts.heightM
+        );
       }
 
       const { featureCollectionToMesh } = await import("./mesh");
       if (mySeq !== this.activeSeq(kind) || this.disposed) return null;
-      const mesh = featureCollectionToMesh(fc, lod, (done, total) => {
-        if (mySeq !== this.activeSeq(kind)) return;
-        this.emit({
-          percent: Math.round(mapMeshPercent(done, total)),
-          phase: "mesh",
-          label: `Meshing features ${done}/${total}`,
-          done,
-          total,
-        });
-      });
+      const mesh = featureCollectionToMesh(
+        fc,
+        lod,
+        (done, total) => {
+          if (mySeq !== this.activeSeq(kind)) return;
+          this.emit({
+            percent: Math.round(mapMeshPercent(done, total)),
+            phase: "mesh",
+            label: `Meshing features ${done}/${total}`,
+            done,
+            total,
+          });
+        },
+        kind === "view" ? { bbox, heightM: opts.heightM } : undefined
+      );
       this.emit({ percent: 96, phase: "upload", label: "Uploading mesh…" });
       const result: LandLoadResult = {
         mesh,
@@ -515,7 +551,8 @@ export class LandLoader {
     file: string,
     fc: GeoJsonFeatureCollection,
     count: number,
-    bbox: BBox
+    bbox: BBox,
+    heightM?: number
   ): Promise<LandLoadResult | null> {
     return new Promise((resolve) => {
       for (const [s, p] of this.pendingMesh) {
@@ -525,7 +562,13 @@ export class LandLoader {
         }
       }
       this.pendingMesh.set(seq, { kind, key, lod, file, count, bbox, resolve });
-      const msg: MeshWorkerRequest = { seq, lod, fc };
+      const msg: MeshWorkerRequest = {
+        seq,
+        lod,
+        fc,
+        bbox: kind === "view" ? bbox : undefined,
+        heightM: kind === "view" ? heightM : undefined,
+      };
       this.worker!.postMessage(msg);
     });
   }

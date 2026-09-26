@@ -1,6 +1,7 @@
 /** Build ECEF triangle meshes from EPSG:4326 GeoJSON land polygons. */
 
 import earcut from "earcut";
+import { meshLodFromHeight } from "./lod.config";
 import {
   ENU_MIN_EXTENT_M,
   LAND_HEIGHT_M,
@@ -24,6 +25,11 @@ import {
   type PoleKind,
   type Vec3,
 } from "./project";
+
+export type MeshBBox = { west: number; south: number; east: number; north: number };
+
+const MAX_RING_VERTS = 2000;
+const CLIP_PAD_DEG = 0.35;
 
 export type GeoJsonGeometry =
   | { type: "Polygon"; coordinates: number[][][] }
@@ -122,6 +128,160 @@ function pointInRing2D(x: number, y: number, ring: [number, number][]): boolean 
     }
   }
   return inside;
+}
+
+type ClipRect = { west: number; south: number; east: number; north: number };
+
+function lerpLonLat(a: LonLat, b: LonLat, t: number): LonLat {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function bringLonNear(lon: number, ref: number): number {
+  let x = lon;
+  while (x - ref > 180) x -= 360;
+  while (ref - x > 180) x += 360;
+  return x;
+}
+
+function splitBBox(b: MeshBBox): ClipRect[] {
+  if (b.west <= b.east) return [{ west: b.west, south: b.south, east: b.east, north: b.north }];
+  return [
+    { west: b.west, south: b.south, east: 180, north: b.north },
+    { west: -180, south: b.south, east: b.east, north: b.north },
+  ];
+}
+
+function padMeshBBox(b: MeshBBox, pad: number): MeshBBox {
+  const south = Math.max(-85, b.south - pad);
+  const north = Math.min(85, b.north + pad);
+  if (b.west <= b.east) {
+    if (b.east - b.west + 2 * pad >= 359) {
+      return { west: -180, south, east: 180, north };
+    }
+    let west = b.west - pad;
+    let east = b.east + pad;
+    if (west < -180) west += 360;
+    if (east > 180) east -= 360;
+    return { west, south, east, north };
+  }
+  let west = b.west - pad;
+  let east = b.east + pad;
+  if (west < -180) west += 360;
+  if (east > 180) east -= 360;
+  return { west, south, east, north };
+}
+
+function isWorldMeshBBox(b: MeshBBox): boolean {
+  return b.west <= -179 && b.east >= 179 && b.south <= -84 && b.north >= 84;
+}
+
+function rectInLonFrame(r: ClipRect, refLon: number): ClipRect {
+  let west = bringLonNear(r.west, refLon);
+  let east = bringLonNear(r.east, refLon);
+  if (east < west) east += 360;
+  return { west, south: r.south, east, north: r.north };
+}
+
+function clipPlane(
+  ring: LonLat[],
+  inside: (p: LonLat) => boolean,
+  intersect: (a: LonLat, b: LonLat) => LonLat
+): LonLat[] {
+  if (ring.length < 3) return [];
+  const out: LonLat[] = [];
+  const n = ring.length;
+  for (let i = 0; i < n; i++) {
+    const cur = ring[i];
+    const prev = ring[(i + n - 1) % n];
+    const curIn = inside(cur);
+    const prevIn = inside(prev);
+    if (curIn) {
+      if (!prevIn) out.push(intersect(prev, cur));
+      out.push(cur);
+    } else if (prevIn) {
+      out.push(intersect(prev, cur));
+    }
+  }
+  return uniqueVerts(out);
+}
+
+function clipRingToRect(ring: LonLat[], r: ClipRect): LonLat[] {
+  const dx = (a: LonLat, b: LonLat, x: number): LonLat => {
+    const d = b[0] - a[0];
+    const t = Math.abs(d) < 1e-18 ? 0 : (x - a[0]) / d;
+    return lerpLonLat(a, b, Math.max(0, Math.min(1, t)));
+  };
+  const dy = (a: LonLat, b: LonLat, y: number): LonLat => {
+    const d = b[1] - a[1];
+    const t = Math.abs(d) < 1e-18 ? 0 : (y - a[1]) / d;
+    return lerpLonLat(a, b, Math.max(0, Math.min(1, t)));
+  };
+  let p = ring;
+  p = clipPlane(p, (q) => q[0] >= r.west - 1e-12, (a, b) => dx(a, b, r.west));
+  p = clipPlane(p, (q) => q[0] <= r.east + 1e-12, (a, b) => dx(a, b, r.east));
+  p = clipPlane(p, (q) => q[1] >= r.south - 1e-12, (a, b) => dy(a, b, r.south));
+  p = clipPlane(p, (q) => q[1] <= r.north + 1e-12, (a, b) => dy(a, b, r.north));
+  return p;
+}
+
+function capRingVerts(ring: LonLat[], maxVerts: number): LonLat[] {
+  if (ring.length <= maxVerts) return ring;
+  const out: LonLat[] = [];
+  const n = ring.length;
+  for (let i = 0; i < maxVerts; i++) {
+    out.push(ring[Math.floor((i * n) / maxVerts)]);
+  }
+  return uniqueVerts(out);
+}
+
+function clipPreparedPiece(
+  piece: { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind },
+  bbox: MeshBBox
+): { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind }[] {
+  const ref = piece.exterior[0][0];
+  const out: { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind }[] = [];
+  for (const raw of splitBBox(bbox)) {
+    const r = rectInLonFrame(raw, ref);
+    let ext = clipRingToRect(piece.exterior, r);
+    if (ext.length < 3) {
+      const cx = (r.west + r.east) / 2;
+      const cy = (r.south + r.north) / 2;
+      if (pointInRing2D(cx, cy, piece.exterior as [number, number][])) {
+        ext = [
+          [r.west, r.south],
+          [r.east, r.south],
+          [r.east, r.north],
+          [r.west, r.north],
+        ];
+      } else {
+        continue;
+      }
+    }
+    let skip = false;
+    const holes: LonLat[][] = [];
+    for (const h of piece.holes) {
+      let ch = clipRingToRect(h, r);
+      if (ch.length < 3) {
+        const cx = (r.west + r.east) / 2;
+        const cy = (r.south + r.north) / 2;
+        if (pointInRing2D(cx, cy, h as [number, number][])) {
+          skip = true;
+          break;
+        }
+        continue;
+      }
+      holes.push(capRingVerts(ch, MAX_RING_VERTS));
+    }
+    if (skip) continue;
+    const capped = capRingVerts(ext, MAX_RING_VERTS);
+    if (capped.length < 3) continue;
+    out.push({
+      exterior: capped,
+      holes,
+      pole: ringEnclosesPole(capped),
+    });
+  }
+  return out;
 }
 
 /** Prepare exterior (+ holes) into simple chart-ready pieces. */
@@ -580,10 +740,19 @@ function processPolygonRings(
   positions: number[],
   normals: number[],
   indices: number[],
-  stats: MeshStats
+  stats: MeshStats,
+  clipBBox?: MeshBBox
 ): number {
   stats.polygonsIn++;
-  const pieces = preparePolygonPieces(rings, stats);
+  let pieces = preparePolygonPieces(rings, stats);
+  if (clipBBox && !isWorldMeshBBox(clipBBox)) {
+    const padded = padMeshBBox(clipBBox, CLIP_PAD_DEG);
+    const clipped: typeof pieces = [];
+    for (const piece of pieces) {
+      clipped.push(...clipPreparedPiece(piece, padded));
+    }
+    pieces = clipped;
+  }
   let tris = 0;
   for (const piece of pieces) {
     tris += appendPiece(
@@ -602,12 +771,20 @@ function processPolygonRings(
 
 export type MeshProgressFn = (done: number, total: number) => void;
 
+export type MeshBuildOpts = {
+  bbox?: MeshBBox;
+  heightM?: number;
+};
+
 /** Convert a FeatureCollection (EPSG:4326) into a single ECEF mesh. */
 export function featureCollectionToMesh(
   fc: GeoJsonFeatureCollection,
   lod: 0 | 1 | 2 = 0,
-  onProgress?: MeshProgressFn
+  onProgress?: MeshProgressFn,
+  opts?: MeshBuildOpts
 ): LandMesh {
+  const tessLod = opts?.heightM != null ? meshLodFromHeight(opts.heightM) : lod;
+  const clipBBox = opts?.bbox;
   const positions: number[] = [];
   const normals: number[] = [];
   const indices: number[] = [];
@@ -617,14 +794,14 @@ export function featureCollectionToMesh(
   let triangleCount = 0;
   const total = Math.max(1, fc.features.length);
   let processed = 0;
-  let lastPct = -1;
+  let lastEmit = -1;
 
-  const report = () => {
+  const report = (frac = 0) => {
     if (!onProgress) return;
-    const pct = Math.floor((processed / total) * 100);
-    if (pct === lastPct && processed < total) return;
-    lastPct = pct;
-    onProgress(processed, total);
+    const v = Math.min(total, processed + frac);
+    if (v === lastEmit && processed < total) return;
+    lastEmit = v;
+    onProgress(v, total);
   };
   report();
 
@@ -637,17 +814,30 @@ export function featureCollectionToMesh(
     const g = f.geometry;
     let tris = 0;
     if (g.type === "Polygon") {
+      report(0.25);
       tris = processPolygonRings(
         g.coordinates as number[][][],
-        lod,
+        tessLod,
         positions,
         normals,
         indices,
-        stats
+        stats,
+        clipBBox
       );
     } else if (g.type === "MultiPolygon") {
-      for (const poly of g.coordinates as number[][][][]) {
-        tris += processPolygonRings(poly, lod, positions, normals, indices, stats);
+      const polys = g.coordinates as number[][][][];
+      const n = Math.max(1, polys.length);
+      for (let i = 0; i < polys.length; i++) {
+        report(i / n);
+        tris += processPolygonRings(
+          polys[i],
+          tessLod,
+          positions,
+          normals,
+          indices,
+          stats,
+          clipBBox
+        );
       }
     }
     if (tris > 0) {
@@ -663,7 +853,7 @@ export function featureCollectionToMesh(
 
   if (typeof console !== "undefined" && console.info) {
     console.info("[land mesh]", {
-      lod,
+      lod: tessLod,
       features: featureCount,
       triangles: triangleCount,
       vertices: stats.vertices,

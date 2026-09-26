@@ -1,11 +1,18 @@
 /** Web Worker: FeatureCollection → ECEF land mesh (transferable buffers). */
 
-import { featureCollectionToMesh, type GeoJsonFeatureCollection, type MeshStats } from "./mesh";
+import {
+  featureCollectionToMesh,
+  type GeoJsonFeatureCollection,
+  type MeshBBox,
+  type MeshStats,
+} from "./mesh";
 
 export type MeshWorkerRequest = {
   seq: number;
   lod: 0 | 1 | 2;
   fc: GeoJsonFeatureCollection;
+  bbox?: MeshBBox;
+  heightM?: number;
 };
 
 export type MeshWorkerProgress = {
@@ -14,7 +21,6 @@ export type MeshWorkerProgress = {
   phase: "mesh";
   done: number;
   total: number;
-  /** 0–100 within mesh phase */
   percent: number;
 };
 
@@ -39,24 +45,29 @@ export type MeshWorkerResponse =
   | MeshWorkerProgress;
 
 self.onmessage = (ev: MessageEvent<MeshWorkerRequest>) => {
-  const { seq, lod, fc } = ev.data;
+  const { seq, lod, fc, bbox, heightM } = ev.data;
   try {
     let lastEmit = 0;
-    const mesh = featureCollectionToMesh(fc, lod, (done, total) => {
-      const now = Date.now();
-      if (done < total && now - lastEmit < 40) return;
-      lastEmit = now;
-      const percent = total > 0 ? Math.round((done / total) * 100) : 100;
-      const prog: MeshWorkerProgress = {
-        type: "progress",
-        seq,
-        phase: "mesh",
-        done,
-        total,
-        percent,
-      };
-      (self as unknown as Worker).postMessage(prog);
-    });
+    const mesh = featureCollectionToMesh(
+      fc,
+      lod,
+      (done, total) => {
+        const now = Date.now();
+        if (done < total && now - lastEmit < 40) return;
+        lastEmit = now;
+        const percent = total > 0 ? Math.round((done / total) * 100) : 100;
+        const prog: MeshWorkerProgress = {
+          type: "progress",
+          seq,
+          phase: "mesh",
+          done,
+          total,
+          percent,
+        };
+        (self as unknown as Worker).postMessage(prog);
+      },
+      { bbox, heightM }
+    );
     const res: MeshWorkerResponse = {
       type: "result",
       seq,

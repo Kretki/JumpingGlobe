@@ -47,3 +47,16 @@ export function meshLodFromFile(file: string): LandLod {
 export function lodFromHeight(heightM: number): LandLod {
   return meshLodFromFile(lodFileFromHeight(heightM));
 }
+
+export function meshLodFromHeight(heightM: number): LandLod {
+  if (heightM > 1_000_000) return 0;
+  if (heightM > 400_000) return 1;
+  return 2;
+}
+
+export function maxSpanFromHeight(heightM: number): number {
+  if (heightM > 3_000_000) return 40;
+  if (heightM > 1_000_000) return 20;
+  if (heightM > 300_000) return 12;
+  return 8;
+}

@@ -98,6 +98,16 @@ function assert(cond: boolean, msg: string) {
     mesh.stats.maxEdgeMObserved <= MAX_EDGE_M[0] * 1.05,
     `maxEdge observed ${mesh.stats.maxEdgeMObserved}`
   );
+
+  const clipped = featureCollectionToMesh(fc, 0, undefined, {
+    bbox: { west: 5, south: 5, east: 10, north: 10 },
+    heightM: 3_000_000,
+  });
+  assert(clipped.triangleCount > 0, "clip to view bbox still produces triangles");
+  assert(
+    clipped.triangleCount <= mesh.triangleCount,
+    "clipped mesh is not larger than full polygon"
+  );
 }
 
 // Asia-like dateline spanning polygon (proper ring across ±180)
