@@ -69,3 +69,6 @@ temp/
 
 #External heavy data
 public/data
+
+#Python runtime files
+*.pyc

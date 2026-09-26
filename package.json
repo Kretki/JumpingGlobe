@@ -7,7 +7,8 @@
     "dev": "vite",
     "server": "python3 -m uvicorn server.app:app --reload --host 127.0.0.1 --port 8765",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:land": "tsx src/land/project.test.ts"
   },
   "devDependencies": {
     "@types/earcut": "^3.0.0",

@@ -52,11 +52,74 @@
         color: #e8eef7;
         font-weight: 600;
       }
+      #land-progress {
+        position: fixed;
+        right: 16px;
+        top: 16px;
+        width: min(280px, calc(100vw - 32px));
+        color: #c5d0de;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        pointer-events: none;
+        user-select: none;
+        background: rgba(11, 15, 20, 0.82);
+        padding: 12px 14px;
+        border-radius: 8px;
+        border: 1px solid rgba(154, 164, 178, 0.25);
+        opacity: 0;
+        transform: translateY(-6px);
+        transition: opacity 0.2s ease, transform 0.2s ease;
+      }
+      #land-progress.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      #land-progress .title {
+        color: #e8eef7;
+        font-weight: 600;
+        margin-bottom: 6px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #land-progress .pct {
+        color: #7dd3a7;
+        font-variant-numeric: tabular-nums;
+      }
+      #land-progress .bar {
+        height: 6px;
+        border-radius: 3px;
+        background: rgba(154, 164, 178, 0.18);
+        overflow: hidden;
+        margin-bottom: 6px;
+      }
+      #land-progress .bar > i {
+        display: block;
+        height: 100%;
+        width: 0%;
+        border-radius: 3px;
+        background: linear-gradient(90deg, #3d9a6a, #7dd3a7);
+        transition: width 0.12s ease-out;
+      }
+      #land-progress .label {
+        color: #9aa4b2;
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
     </style>
   </head>
   <body>
     <canvas id="gl"></canvas>
     <div id="coords"></div>
+    <div id="land-progress" aria-live="polite">
+      <div class="title">
+        <span>Land load</span>
+        <span class="pct">0%</span>
+      </div>
+      <div class="bar"><i id="land-progress-fill"></i></div>
+      <div class="label" id="land-progress-label">Idle</div>
+    </div>
     <div id="hint">Drag to orbit · Scroll to zoom (50 m – 2×10⁷ m) · Land LODs via /api</div>
     <script type="module" src="/src/main.ts"></script>
   </body>

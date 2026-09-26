@@ -354,7 +354,44 @@ function fmt(n: number, digits: number): string {
   return n.toFixed(digits);
 }
 
-const landLoader = new LandLoader("/api");
+const progressEl = document.getElementById("land-progress") as HTMLDivElement;
+const progressFill = document.getElementById("land-progress-fill") as HTMLElement;
+const progressLabel = document.getElementById("land-progress-label") as HTMLDivElement;
+const progressPct = progressEl.querySelector(".pct") as HTMLSpanElement;
+let progressHideTimer = 0;
+let landLoadPercent = 0;
+let landLoading = false;
+
+function setLandProgress(percent: number, label: string, visible: boolean) {
+  landLoadPercent = Math.max(0, Math.min(100, Math.round(percent)));
+  landLoading = visible && landLoadPercent < 100;
+  progressPct.textContent = `${landLoadPercent}%`;
+  progressFill.style.width = `${landLoadPercent}%`;
+  progressLabel.textContent = label;
+  if (visible) {
+    progressEl.classList.add("visible");
+    window.clearTimeout(progressHideTimer);
+    if (landLoadPercent >= 100) {
+      progressHideTimer = window.setTimeout(() => {
+        progressEl.classList.remove("visible");
+        landLoading = false;
+      }, 900);
+    }
+  } else if (landLoadPercent >= 100 || label === "Idle") {
+    progressEl.classList.remove("visible");
+    landLoading = false;
+  }
+}
+
+const landLoader = new LandLoader("/api", (p) => {
+  const show = p.phase !== "idle" && p.phase !== "done";
+  const keepVisible = p.phase === "done" || show;
+  setLandProgress(p.percent, p.label, keepVisible);
+  if (p.phase !== "done" && p.phase !== "idle") {
+    landStatus = `${p.label} · ${Math.round(p.percent)}%`;
+  }
+});
+
 let landStatus = "loading…";
 let landLoadTimer = 0;
 let lastLoadLon = NaN;
@@ -374,15 +411,26 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
     lastLoadLon = lon;
     lastLoadLat = lat;
     lastLoadH = h;
-    landStatus = "fetching…";
+    setLandProgress(0, "Starting…", true);
+    landStatus = "loading…";
     const result = await landLoader.loadForView(lon, lat, h);
     if (!result) {
-      if (landIndexCount === 0) landStatus = "API offline (run npm run server)";
+      if (landIndexCount === 0) {
+        landStatus = "API offline (run npm run server)";
+        setLandProgress(0, "API offline — run npm run server", true);
+      }
       return;
     }
+    setLandProgress(98, "Uploading GPU buffers…", true);
     uploadLandMesh(result.mesh);
     landLod = result.lod;
-    landStatus = `lod${result.lod} · ${result.count} feats · ${result.mesh.triangleCount} tris`;
+    const st = result.stats;
+    const fail = st ? st.earcutEmpty + st.earcutThrow : 0;
+    landStatus =
+      `lod${result.lod} · ${result.count} feats · ${result.mesh.triangleCount} tris` +
+      (fail ? ` · fail ${fail}` : "") +
+      (st ? ` · maxEdge ${Math.round(st.maxEdgeMObserved)}m` : "");
+    setLandProgress(100, landStatus, true);
   }, 180);
 }
 
@@ -461,9 +509,11 @@ function frame() {
     eye
   );
 
-  // Land polygons (EPSG:4326 → ECEF)
+  // Land polygons (EPSG:4326 → ECEF); windings forced outward in mesh pipeline
   if (landIndexCount > 0) {
-    gl!.disable(gl!.CULL_FACE); // mixed winding after projection
+    gl!.enable(gl!.CULL_FACE);
+    gl!.frontFace(gl!.CCW);
+    gl!.cullFace(gl!.BACK);
     drawMesh(
       landPosBuf,
       landNrmBuf,
@@ -475,7 +525,6 @@ function frame() {
       model,
       eye
     );
-    gl!.enable(gl!.CULL_FACE);
   }
 
   requestAnimationFrame(frame);
