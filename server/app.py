@@ -6,7 +6,7 @@ never loads the full multi-hundred-MB (or 1.5 GiB) datasets.
 
   GET /api/health
   GET /api/land/stats
-  GET /api/land?lod=0&bbox=west,south,east,north&limit=25000&min_area=0
+  GET /api/land?file=land_lod0.gpkg&bbox=west,south,east,north&limit=25000&min_area=0
 
 Run:
   uvicorn server.app:app --reload --port 8765
@@ -46,18 +46,18 @@ def health() -> dict:
 @app.get("/api/land/stats")
 def land_stats() -> dict:
     lods = {}
-    for lod in store.available_lods():
+    for name in store.available_lods():
         try:
-            lods[lod] = store.stats(lod)
+            lods[name] = store.stats(name)
         except OSError as exc:
-            lods[lod] = {"error": str(exc)}
+            lods[name] = {"error": str(exc)}
     full = DATA_DIR / "land_polygons.gpkg"
     return {
         "lods": lods,
         "full_resolution": {
             "path": full.name if full.is_file() else None,
             "size_bytes": full.stat().st_size if full.is_file() else 0,
-            "note": "Too large for browser bulk load; use lod 0–2 via /api/land",
+            "note": "Too large for browser bulk load; use LOD gpkg files via /api/land",
         },
         "srs": "EPSG:4326",
     }
@@ -65,7 +65,7 @@ def land_stats() -> dict:
 
 @app.get("/api/land")
 def land(
-    lod: int = Query(0, ge=0, le=2, description="Detail level: 0=coarse … 2=fine"),
+    file: str = Query("land_lod0.gpkg", description="GPKG filename in public/data"),
     bbox: str = Query(
         ...,
         description="west,south,east,north in EPSG:4326 degrees (west>east = antimeridian wrap)",
@@ -93,7 +93,7 @@ def land(
 
     try:
         return store.query_bbox(
-            lod, west, south, east, north, limit=limit, min_area=min_area
+            file, west, south, east, north, limit=limit, min_area=min_area
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

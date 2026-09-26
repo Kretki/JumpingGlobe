@@ -2,23 +2,32 @@
 
 import type { GeoJsonFeatureCollection, LandMesh, MeshStats } from "./mesh";
 import type { MeshWorkerRequest, MeshWorkerResponse } from "./meshWorker";
+import {
+  WORLD_BBOX,
+  WORLD_FILE,
+  lodFileFromHeight,
+  meshLodFromFile,
+  type LandLod,
+} from "./lod.config";
+
+export { lodFileFromHeight, lodFromHeight, meshLodFromFile, WORLD_FILE, WORLD_BBOX } from "./lod.config";
+export type { LandLod, LodHeightBand } from "./lod.config";
 
 export type BBox = { west: number; south: number; east: number; north: number };
 
 export type LandLoadResult = {
   mesh: LandMesh;
   lod: number;
+  file: string;
   count: number;
   bbox: BBox;
   stats?: MeshStats;
 };
 
-/** Overall load progress for UI (0–100). */
 export type LandLoadProgress = {
   percent: number;
   phase: "idle" | "fetch" | "parse" | "mesh" | "upload" | "done";
   label: string;
-  /** Optional sub-counts for mesh phase */
   done?: number;
   total?: number;
 };
@@ -29,14 +38,6 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
-/** Choose LOD from camera height (meters above ellipsoid). */
-export function lodFromHeight(heightM: number): 0 | 1 | 2 {
-  if (heightM > 4_000_000) return 0;
-  if (heightM > 800_000) return 1;
-  return 2;
-}
-
-/** Drop tiny islands when zoomed out (envelope area deg²). */
 export function minAreaFromHeight(heightM: number): number {
   if (heightM > 8_000_000) return 0.5;
   if (heightM > 3_000_000) return 0.05;
@@ -46,33 +47,26 @@ export function minAreaFromHeight(heightM: number): number {
 }
 
 export function featureLimitFromHeight(heightM: number): number {
-  if (heightM > 8_000_000) return 8_000;
-  if (heightM > 3_000_000) return 15_000;
-  if (heightM > 1_000_000) return 25_000;
-  return 40_000;
+  if (heightM > 3_000_000) return 8_000;
+  if (heightM > 1_000_000) return 12_000;
+  return 15_000;
 }
 
-/**
- * Approximate visible lon/lat bbox from camera look direction + height.
- * Pads so orbit/pan does not constantly reload.
- */
 export function viewBBox(
   lonDeg: number,
   latDeg: number,
   heightM: number,
-  padScale = 1.35
+  padScale = 1.35,
+  maxSpanDeg = 80
 ): BBox {
   const R = 6_371_000;
   const ang = Math.acos(clamp(R / (R + Math.max(heightM, 1)), -1, 1));
+  const maxHalf = maxSpanDeg / 2;
   let halfLon = ((ang * 180) / Math.PI) * padScale;
   let halfLat = halfLon * padScale;
   const cosLat = Math.max(0.15, Math.cos((latDeg * Math.PI) / 180));
-  halfLon = Math.min(180, halfLon / cosLat);
-  halfLat = Math.min(90, halfLat);
-
-  if (heightM > 6_000_000) {
-    return { west: -180, south: -85, east: 180, north: 85 };
-  }
+  halfLon = Math.min(maxHalf, halfLon / cosLat);
+  halfLat = Math.min(maxHalf, halfLat);
 
   let south = clamp(latDeg - halfLat, -85, 85);
   let north = clamp(latDeg + halfLat, -85, 85);
@@ -86,17 +80,12 @@ export function viewBBox(
   west = norm(west);
   east = norm(east);
 
-  const span = west <= east ? east - west : 360 - (west - east);
-  if (span > 300) {
-    return { west: -180, south, east: 180, north };
-  }
-
   return { west, south, east, north };
 }
 
-function bboxKey(b: BBox, lod: number, minArea: number): string {
+function bboxKey(b: BBox, file: string, minArea: number): string {
   const q = (n: number) => n.toFixed(2);
-  return `${lod}|${q(b.west)},${q(b.south)},${q(b.east)},${q(b.north)}|${minArea.toFixed(4)}`;
+  return `${file}|${q(b.west)},${q(b.south)},${q(b.east)},${q(b.north)}|${minArea.toFixed(4)}`;
 }
 
 class LruCache<V> {
@@ -124,42 +113,57 @@ class LruCache<V> {
     }
   }
 
+  clear() {
+    this.map.clear();
+  }
+
+  deleteMatching(pred: (key: string) => boolean) {
+    for (const k of [...this.map.keys()]) {
+      if (pred(k)) this.map.delete(k);
+    }
+  }
+
   get size() {
     return this.map.size;
   }
 }
 
-/** Fetch 0–35%, parse 35–40%, mesh 40–95%, upload/done 95–100%. */
 function mapFetchPercent(bytes: number, total: number | null): number {
   if (total && total > 0) return clamp((bytes / total) * 35, 0, 35);
-  // Unknown length: asymptotic approach toward 30%
   return clamp(30 * (1 - Math.exp(-bytes / 2e6)), 0, 30);
 }
 
 function mapMeshPercent(done: number, total: number): number {
   const t = total > 0 ? done / total : 1;
-  return 40 + t * 55; // 40 → 95
+  return 40 + t * 55;
 }
 
+type PendingKind = "world" | "view";
+
 export class LandLoader {
-  private cache = new LruCache<LandLoadResult>(12);
-  private inflightFetch: AbortController | null = null;
-  private lastKey = "";
+  private viewCache = new LruCache<LandLoadResult>(8);
+  private worldResult: LandLoadResult | null = null;
+  private inflightWorld: AbortController | null = null;
+  private inflightView: AbortController | null = null;
+  private lastViewKey = "";
   private baseUrl: string;
-  private lastGood: LandLoadResult | null = null;
   private worker: Worker | null = null;
-  private seq = 0;
+  private worldSeq = 0;
+  private viewSeq = 0;
   private pendingMesh = new Map<
     number,
     {
+      kind: PendingKind;
       key: string;
       lod: number;
+      file: string;
       count: number;
       bbox: BBox;
       resolve: (r: LandLoadResult | null) => void;
     }
   >();
   private workerReady = false;
+  private disposed = false;
   private onProgress: LandProgressFn | null = null;
 
   constructor(baseUrl = "/api", onProgress?: LandProgressFn) {
@@ -195,9 +199,14 @@ export class LandLoader {
     }
   }
 
+  private activeSeq(kind: PendingKind): number {
+    return kind === "world" ? this.worldSeq : this.viewSeq;
+  }
+
   private onWorkerMessage(data: MeshWorkerResponse) {
     if (data.type === "progress") {
-      if (data.seq !== this.seq) return;
+      const pending = this.pendingMesh.get(data.seq);
+      if (!pending || data.seq !== this.activeSeq(pending.kind)) return;
       const overall = Math.round(mapMeshPercent(data.done, data.total));
       this.emit({
         percent: overall,
@@ -213,15 +222,15 @@ export class LandLoader {
     if (!pending) return;
     this.pendingMesh.delete(data.seq);
 
-    if (data.seq !== this.seq) {
-      pending.resolve(this.lastGood);
+    if (data.seq !== this.activeSeq(pending.kind)) {
+      pending.resolve(null);
       return;
     }
 
     if (!data.ok) {
       console.warn("land mesh failed", data.error);
       this.emit({ percent: 0, phase: "idle", label: "Mesh failed" });
-      pending.resolve(this.lastGood);
+      pending.resolve(null);
       return;
     }
 
@@ -238,57 +247,144 @@ export class LandLoader {
     const result: LandLoadResult = {
       mesh,
       lod: pending.lod,
+      file: pending.file,
       count: pending.count,
       bbox: pending.bbox,
       stats: data.stats,
     };
-    this.cache.set(pending.key, result);
-    this.lastKey = pending.key;
-    this.lastGood = result;
+    this.storeResult(pending.kind, pending.key, result);
     this.emit({ percent: 100, phase: "done", label: "Done" });
     pending.resolve(result);
   }
 
-  getLastGood(): LandLoadResult | null {
-    return this.lastGood;
+  private storeResult(kind: PendingKind, key: string, result: LandLoadResult) {
+    if (kind === "world") {
+      this.worldResult = result;
+    } else {
+      this.viewCache.set(key, result);
+      this.lastViewKey = key;
+    }
   }
 
-  async loadForView(
-    lonDeg: number,
-    latDeg: number,
-    heightM: number
-  ): Promise<LandLoadResult | null> {
-    const lod = lodFromHeight(heightM);
+  getWorld(): LandLoadResult | null {
+    return this.worldResult;
+  }
+
+  async loadWorld(): Promise<LandLoadResult | null> {
+    if (this.disposed) return null;
+    if (this.worldResult) {
+      this.emit({ percent: 100, phase: "done", label: "Cached" });
+      return this.worldResult;
+    }
+    return this.fetchAndMesh({
+      kind: "world",
+      file: WORLD_FILE,
+      bbox: WORLD_BBOX,
+      minArea: 0.5,
+      limit: 8_000,
+    });
+  }
+
+  async loadView(lonDeg: number, latDeg: number, heightM: number): Promise<LandLoadResult | null> {
+    if (this.disposed) return null;
+    const file = lodFileFromHeight(heightM);
+    if (file === WORLD_FILE) return this.worldResult;
     const bbox = viewBBox(lonDeg, latDeg, heightM);
     const minArea = minAreaFromHeight(heightM);
     const limit = featureLimitFromHeight(heightM);
-    const key = bboxKey(bbox, lod, minArea);
+    const key = bboxKey(bbox, file, minArea);
 
-    const cached = this.cache.get(key);
+    const cached = this.viewCache.get(key);
     if (cached) {
-      this.lastKey = key;
-      this.lastGood = cached;
+      this.lastViewKey = key;
       this.emit({ percent: 100, phase: "done", label: "Cached" });
       return cached;
     }
 
-    if (this.lastKey && this.similarKey(this.lastKey, key)) {
-      const prev = this.cache.get(this.lastKey);
-      if (prev) {
-        this.lastGood = prev;
+    if (this.lastViewKey && this.similarKey(this.lastViewKey, key)) {
+      const prev = this.viewCache.get(this.lastViewKey);
+      if (prev && prev.file === file) {
         this.emit({ percent: 100, phase: "done", label: "Cached" });
         return prev;
       }
     }
 
-    if (this.inflightFetch) this.inflightFetch.abort();
-    const ac = new AbortController();
-    this.inflightFetch = ac;
+    return this.fetchAndMesh({
+      kind: "view",
+      file,
+      bbox,
+      minArea,
+      limit,
+      key,
+    });
+  }
 
-    const mySeq = ++this.seq;
+  cancelView() {
+    this.viewSeq++;
+    if (this.inflightView) {
+      this.inflightView.abort();
+      this.inflightView = null;
+    }
+    for (const [s, p] of this.pendingMesh) {
+      if (p.kind === "view") {
+        p.resolve(null);
+        this.pendingMesh.delete(s);
+      }
+    }
+    this.emit({ percent: 0, phase: "idle", label: "Idle" });
+  }
+
+  evictDetail() {
+    this.viewCache.clear();
+    this.lastViewKey = "";
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.inflightWorld?.abort();
+    this.inflightView?.abort();
+    this.inflightWorld = null;
+    this.inflightView = null;
+    this.worldSeq++;
+    this.viewSeq++;
+    for (const p of this.pendingMesh.values()) p.resolve(null);
+    this.pendingMesh.clear();
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+      this.workerReady = false;
+    }
+    this.viewCache.clear();
+    this.worldResult = null;
+    this.lastViewKey = "";
+    this.onProgress = null;
+  }
+
+  private async fetchAndMesh(opts: {
+    kind: PendingKind;
+    file: string;
+    bbox: BBox;
+    minArea: number;
+    limit: number;
+    key?: string;
+  }): Promise<LandLoadResult | null> {
+    const file = opts.file;
+    const bbox = opts.bbox;
+    const minArea = opts.minArea;
+    const limit = opts.limit;
+    const lod: LandLod = meshLodFromFile(file);
+    const key = opts.key ?? bboxKey(bbox, file, minArea);
+    const kind = opts.kind;
+
+    if (kind === "view" && this.inflightView) this.inflightView.abort();
+    const ac = new AbortController();
+    if (kind === "world") this.inflightWorld = ac;
+    else this.inflightView = ac;
+
+    const mySeq = kind === "world" ? ++this.worldSeq : ++this.viewSeq;
 
     const params = new URLSearchParams({
-      lod: String(lod),
+      file,
       bbox: `${bbox.west},${bbox.south},${bbox.east},${bbox.north}`,
       limit: String(limit),
       min_area: String(minArea),
@@ -303,12 +399,12 @@ export class LandLoader {
       if (!res.ok) {
         console.warn("land API", res.status, await res.text());
         this.emit({ percent: 0, phase: "idle", label: "API error" });
-        return this.lastGood;
+        return null;
       }
-      if (mySeq !== this.seq) return this.lastGood;
+      if (mySeq !== this.activeSeq(kind) || this.disposed) return null;
 
       const text = await this.readBodyWithProgress(res, ac.signal);
-      if (mySeq !== this.seq) return this.lastGood;
+      if (mySeq !== this.activeSeq(kind) || this.disposed) return null;
 
       this.emit({ percent: 37, phase: "parse", label: "Parsing GeoJSON…" });
       const fc = JSON.parse(text) as GeoJsonFeatureCollection;
@@ -323,13 +419,13 @@ export class LandLoader {
       });
 
       if (this.worker && this.workerReady) {
-        return await this.meshInWorker(mySeq, key, lod, fc, count, bbox);
+        return await this.meshInWorker(kind, mySeq, key, lod, file, fc, count, bbox);
       }
 
       const { featureCollectionToMesh } = await import("./mesh");
-      if (mySeq !== this.seq) return this.lastGood;
+      if (mySeq !== this.activeSeq(kind) || this.disposed) return null;
       const mesh = featureCollectionToMesh(fc, lod, (done, total) => {
-        if (mySeq !== this.seq) return;
+        if (mySeq !== this.activeSeq(kind)) return;
         this.emit({
           percent: Math.round(mapMeshPercent(done, total)),
           phase: "mesh",
@@ -342,24 +438,24 @@ export class LandLoader {
       const result: LandLoadResult = {
         mesh,
         lod,
+        file,
         count,
         bbox,
         stats: mesh.stats,
       };
-      this.cache.set(key, result);
-      this.lastKey = key;
-      this.lastGood = result;
+      this.storeResult(kind, key, result);
       this.emit({ percent: 100, phase: "done", label: "Done" });
       return result;
     } catch (err) {
       if ((err as Error).name === "AbortError") {
-        return this.lastGood;
+        return null;
       }
       console.warn("land load failed", err);
       this.emit({ percent: 0, phase: "idle", label: "Load failed" });
-      return this.lastGood;
+      return null;
     } finally {
-      if (this.inflightFetch === ac) this.inflightFetch = null;
+      if (kind === "world" && this.inflightWorld === ac) this.inflightWorld = null;
+      if (kind === "view" && this.inflightView === ac) this.inflightView = null;
     }
   }
 
@@ -412,21 +508,23 @@ export class LandLoader {
   }
 
   private meshInWorker(
+    kind: PendingKind,
     seq: number,
     key: string,
     lod: 0 | 1 | 2,
+    file: string,
     fc: GeoJsonFeatureCollection,
     count: number,
     bbox: BBox
   ): Promise<LandLoadResult | null> {
     return new Promise((resolve) => {
       for (const [s, p] of this.pendingMesh) {
-        if (s < seq) {
-          p.resolve(this.lastGood);
+        if (p.kind === kind && s < seq) {
+          p.resolve(null);
           this.pendingMesh.delete(s);
         }
       }
-      this.pendingMesh.set(seq, { key, lod, count, bbox, resolve });
+      this.pendingMesh.set(seq, { kind, key, lod, file, count, bbox, resolve });
       const msg: MeshWorkerRequest = { seq, lod, fc };
       this.worker!.postMessage(msg);
     });
@@ -435,6 +533,7 @@ export class LandLoader {
   private similarKey(a: string, b: string): boolean {
     const pa = a.split("|");
     const pb = b.split("|");
+    if (pa.length < 3 || pb.length < 3) return false;
     if (pa[0] !== pb[0] || pa[2] !== pb[2]) return false;
     const ba = pa[1].split(",").map(Number);
     const bb = pb[1].split(",").map(Number);

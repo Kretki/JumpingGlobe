@@ -141,33 +141,45 @@ class LandGpkgStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
         self._local = threading.local()
-        self._paths = {
-            0: self.data_dir / "land_lod0.gpkg",
-            1: self.data_dir / "land_lod1.gpkg",
-            2: self.data_dir / "land_lod2.gpkg",
-            # full-resolution source (not for browser bulk load)
-            3: self.data_dir / "land_polygons.gpkg",
-        }
 
-    def available_lods(self) -> list[int]:
-        return [lod for lod, p in self._paths.items() if lod < 3 and p.is_file()]
+    def resolve_file(self, name: str) -> Path:
+        if not name or name != Path(name).name:
+            raise ValueError("invalid file name")
+        if not name.endswith(".gpkg"):
+            raise ValueError("file must be a .gpkg")
+        root = self.data_dir.resolve()
+        path = (self.data_dir / name).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("invalid file name") from exc
+        if not path.is_file():
+            raise FileNotFoundError(f"LOD file not found: {name}")
+        return path
 
-    def _conn(self, lod: int) -> sqlite3.Connection:
+    def available_lods(self) -> list[str]:
+        if not self.data_dir.is_dir():
+            return []
+        return sorted(
+            p.name
+            for p in self.data_dir.glob("*.gpkg")
+            if p.is_file() and p.name != "land_polygons.gpkg"
+        )
+
+    def _conn(self, name: str) -> sqlite3.Connection:
         if not hasattr(self._local, "conns"):
             self._local.conns = {}
-        conns: dict[int, sqlite3.Connection] = self._local.conns
-        if lod not in conns:
-            path = self._paths.get(lod)
-            if path is None or not path.is_file():
-                raise FileNotFoundError(f"LOD {lod} not found: {path}")
+        conns: dict[str, sqlite3.Connection] = self._local.conns
+        if name not in conns:
+            path = self.resolve_file(name)
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
             conn.row_factory = sqlite3.Row
-            conns[lod] = conn
-        return conns[lod]
+            conns[name] = conn
+        return conns[name]
 
     def query_bbox(
         self,
-        lod: int,
+        file: str,
         west: float,
         south: float,
         east: float,
@@ -180,9 +192,6 @@ class LandGpkgStore:
         Return GeoJSON FeatureCollection of land polygons intersecting bbox.
         Coordinates are EPSG:4326 (lon, lat). Handles antimeridian wrap (west > east).
         """
-        lod = int(lod)
-        if lod not in (0, 1, 2):
-            raise ValueError("lod must be 0, 1, or 2")
         limit = max(1, min(int(limit), 100_000))
 
         # Split bbox if it crosses the antimeridian
@@ -195,7 +204,7 @@ class LandGpkgStore:
 
         features: list[dict[str, Any]] = []
         seen: set[int] = set()
-        conn = self._conn(lod)
+        conn = self._conn(file)
 
         for w, s, e, n in boxes:
             if len(features) >= limit:
@@ -213,7 +222,7 @@ class LandGpkgStore:
                     {
                         "type": "Feature",
                         "id": fid,
-                        "properties": {"fid": fid, "lod": lod},
+                        "properties": {"fid": fid, "file": file},
                         "geometry": geometry,
                     }
                 )
@@ -223,7 +232,7 @@ class LandGpkgStore:
         return {
             "type": "FeatureCollection",
             "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
-            "lod": lod,
+            "file": file,
             "count": len(features),
             "bbox": [west, south, east, north],
             "features": features,
@@ -254,12 +263,12 @@ class LandGpkgStore:
         cur = conn.execute(sql, (west, east, south, north, min_area, limit))
         return [(int(row[0]), bytes(row[1])) for row in cur]
 
-    def stats(self, lod: int) -> dict[str, Any]:
-        conn = self._conn(lod)
+    def stats(self, name: str) -> dict[str, Any]:
+        conn = self._conn(name)
         count = conn.execute("SELECT COUNT(*) FROM land_polygons").fetchone()[0]
-        path = self._paths[lod]
+        path = self.resolve_file(name)
         return {
-            "lod": lod,
+            "file": name,
             "path": str(path.name),
             "features": count,
             "srs": "EPSG:4326",

@@ -1,4 +1,5 @@
 import { LandLoader } from "./land/loader";
+import { WORLD_FILE, lodFileFromHeight } from "./land/lod.config";
 import type { LandMesh } from "./land/mesh";
 
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
@@ -241,22 +242,51 @@ const idxBuf = gl.createBuffer()!;
 gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
 gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ellipsoid.indices, gl.STATIC_DRAW);
 
-const landPosBuf = gl.createBuffer()!;
-const landNrmBuf = gl.createBuffer()!;
-const landIdxBuf = gl.createBuffer()!;
-let landIndexCount = 0;
-let landLod = -1;
-let landFeatureCount = 0;
+type LandSlot = {
+  pos: WebGLBuffer;
+  nrm: WebGLBuffer;
+  idx: WebGLBuffer;
+  indexCount: number;
+};
 
-function uploadLandMesh(mesh: LandMesh) {
-  gl!.bindBuffer(gl!.ARRAY_BUFFER, landPosBuf);
+function makeLandSlot(): LandSlot {
+  return {
+    pos: gl!.createBuffer()!,
+    nrm: gl!.createBuffer()!,
+    idx: gl!.createBuffer()!,
+    indexCount: 0,
+  };
+}
+
+const baseSlot = makeLandSlot();
+const detailSlot = makeLandSlot();
+
+function uploadSlot(slot: LandSlot, mesh: LandMesh) {
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.pos);
   gl!.bufferData(gl!.ARRAY_BUFFER, mesh.positions, gl!.STATIC_DRAW);
-  gl!.bindBuffer(gl!.ARRAY_BUFFER, landNrmBuf);
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.nrm);
   gl!.bufferData(gl!.ARRAY_BUFFER, mesh.normals, gl!.STATIC_DRAW);
-  gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, landIdxBuf);
+  gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, slot.idx);
   gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, mesh.indices, gl!.STATIC_DRAW);
-  landIndexCount = mesh.indices.length;
-  landFeatureCount = mesh.featureCount;
+  slot.indexCount = mesh.indices.length;
+}
+
+function clearSlot(slot: LandSlot) {
+  if (slot.indexCount === 0) return;
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.pos);
+  gl!.bufferData(gl!.ARRAY_BUFFER, 1, gl!.STATIC_DRAW);
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.nrm);
+  gl!.bufferData(gl!.ARRAY_BUFFER, 1, gl!.STATIC_DRAW);
+  gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, slot.idx);
+  gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, 1, gl!.STATIC_DRAW);
+  slot.indexCount = 0;
+}
+
+function destroySlot(slot: LandSlot) {
+  clearSlot(slot);
+  gl!.deleteBuffer(slot.pos);
+  gl!.deleteBuffer(slot.nrm);
+  gl!.deleteBuffer(slot.idx);
 }
 
 const aPosition = gl.getAttribLocation(program, "aPosition");
@@ -397,41 +427,113 @@ let landLoadTimer = 0;
 let lastLoadLon = NaN;
 let lastLoadLat = NaN;
 let lastLoadH = NaN;
+let lastLoadFile = "";
+let lastQueuedLon = NaN;
+let lastQueuedLat = NaN;
+let lastQueuedH = NaN;
+let baseReady = false;
+let worldLoadStarted = false;
+let landDisposed = false;
+
+function resultStatus(prefix: string, result: { file: string; count: number; mesh: LandMesh; stats?: LandMesh["stats"] }): string {
+  const st = result.stats;
+  const fail = st ? st.earcutEmpty + st.earcutThrow : 0;
+  return (
+    `${prefix}${result.file} · ${result.count} feats · ${result.mesh.triangleCount} tris` +
+    (fail ? ` · fail ${fail}` : "") +
+    (st ? ` · maxEdge ${Math.round(st.maxEdgeMObserved)}m` : "")
+  );
+}
+
+async function ensureWorld() {
+  if (landDisposed || baseReady || worldLoadStarted) return;
+  worldLoadStarted = true;
+  setLandProgress(0, "Starting…", true);
+  landStatus = "loading…";
+  const result = await landLoader.loadWorld();
+  if (landDisposed) return;
+  if (!result) {
+    worldLoadStarted = false;
+    landStatus = "API offline (run npm run server)";
+    setLandProgress(0, "API offline — run npm run server", true);
+    return;
+  }
+  uploadSlot(baseSlot, result.mesh);
+  baseReady = true;
+  lastLoadFile = WORLD_FILE;
+  landStatus = resultStatus("world ", result);
+  setLandProgress(100, landStatus, true);
+}
+
+function clearDetail() {
+  landLoader.cancelView();
+  landLoader.evictDetail();
+  clearSlot(detailSlot);
+  lastLoadFile = WORLD_FILE;
+  lastLoadLon = NaN;
+  lastLoadLat = NaN;
+  lastLoadH = NaN;
+  lastQueuedLon = NaN;
+  lastQueuedLat = NaN;
+  lastQueuedH = NaN;
+  if (baseReady) {
+    const world = landLoader.getWorld();
+    landStatus = world ? resultStatus("world ", world) : "world";
+  }
+}
 
 function scheduleLandLoad(lon: number, lat: number, h: number) {
+  if (landDisposed) return;
+  void ensureWorld();
+  const file = lodFileFromHeight(h);
+  if (file === WORLD_FILE) {
+    window.clearTimeout(landLoadTimer);
+    if (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE) clearDetail();
+    return;
+  }
+  if (!baseReady) return;
+
   const moved =
     Math.abs(lon - lastLoadLon) > 1.5 ||
     Math.abs(lat - lastLoadLat) > 1.5 ||
     Math.abs(Math.log(h) - Math.log(lastLoadH || h)) > 0.15 ||
-    Number.isNaN(lastLoadLon);
-  if (!moved && landIndexCount > 0) return;
+    Number.isNaN(lastLoadLon) ||
+    file !== lastLoadFile;
+  if (!moved && detailSlot.indexCount > 0) return;
+
+  if (lon === lastQueuedLon && lat === lastQueuedLat && h === lastQueuedH) return;
+
+  lastQueuedLon = lon;
+  lastQueuedLat = lat;
+  lastQueuedH = h;
 
   window.clearTimeout(landLoadTimer);
   landLoadTimer = window.setTimeout(async () => {
+    if (landDisposed || lodFileFromHeight(height) === WORLD_FILE) return;
     lastLoadLon = lon;
     lastLoadLat = lat;
     lastLoadH = h;
     setLandProgress(0, "Starting…", true);
     landStatus = "loading…";
-    const result = await landLoader.loadForView(lon, lat, h);
-    if (!result) {
-      if (landIndexCount === 0) {
-        landStatus = "API offline (run npm run server)";
-        setLandProgress(0, "API offline — run npm run server", true);
-      }
-      return;
-    }
+    const result = await landLoader.loadView(lon, lat, h);
+    if (landDisposed || lodFileFromHeight(height) === WORLD_FILE) return;
+    if (!result || result.file !== file) return;
     setLandProgress(98, "Uploading GPU buffers…", true);
-    uploadLandMesh(result.mesh);
-    landLod = result.lod;
-    const st = result.stats;
-    const fail = st ? st.earcutEmpty + st.earcutThrow : 0;
-    landStatus =
-      `lod${result.lod} · ${result.count} feats · ${result.mesh.triangleCount} tris` +
-      (fail ? ` · fail ${fail}` : "") +
-      (st ? ` · maxEdge ${Math.round(st.maxEdgeMObserved)}m` : "");
+    uploadSlot(detailSlot, result.mesh);
+    lastLoadFile = result.file;
+    landStatus = resultStatus("", result);
     setLandProgress(100, landStatus, true);
   }, 180);
+}
+
+function disposeLand() {
+  if (landDisposed) return;
+  landDisposed = true;
+  window.clearTimeout(landLoadTimer);
+  landLoader.dispose();
+  destroySlot(detailSlot);
+  destroySlot(baseSlot);
+  baseReady = false;
 }
 
 function updateCoords(surface: number[], eye: number[]) {
@@ -441,6 +543,7 @@ function updateCoords(surface: number[], eye: number[]) {
     `<div>lat ${fmt(g.lat, 6)}° · lon ${fmt(g.lon, 6)}°</div>` +
     `<div>ECEF ${fmt(surface[0], 1)}, ${fmt(surface[1], 1)}, ${fmt(surface[2], 1)} m</div>` +
     `<div>camera height ${fmt(height, 1)} m</div>` +
+    `<div>lod ${lodFileFromHeight(height)}</div>` +
     `<div>land ${landStatus}</div>`;
   scheduleLandLoad(g.lon, g.lat, height);
 }
@@ -509,16 +612,16 @@ function frame() {
     eye
   );
 
-  // Land polygons (EPSG:4326 → ECEF); windings forced outward in mesh pipeline
-  if (landIndexCount > 0) {
+  const land = detailSlot.indexCount > 0 ? detailSlot : baseSlot;
+  if (land.indexCount > 0) {
     gl!.enable(gl!.CULL_FACE);
     gl!.frontFace(gl!.CCW);
     gl!.cullFace(gl!.BACK);
     drawMesh(
-      landPosBuf,
-      landNrmBuf,
-      landIdxBuf,
-      landIndexCount,
+      land.pos,
+      land.nrm,
+      land.idx,
+      land.indexCount,
       gl!.UNSIGNED_INT,
       [0.28, 0.62, 0.32],
       mvp,
@@ -530,4 +633,7 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
+window.addEventListener("pagehide", (e) => {
+  if (!e.persisted) disposeLand();
+});
 requestAnimationFrame(frame);
