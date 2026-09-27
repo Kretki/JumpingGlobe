@@ -687,7 +687,7 @@ function frame() {
       detailSlot.idx,
       detailSlot.indexCount,
       gl!.UNSIGNED_INT,
-      [0.32, 0.72, 0.36],
+      [0.28, 0.62, 0.32],
       mvp,
       model,
       eye

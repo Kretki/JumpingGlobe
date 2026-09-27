@@ -7,13 +7,15 @@
     { "file": "land_lod1.gpkg", "orderNum": 1, "maxEdgeM": 25000, "maxBoundaryEdgeM": 25000 },
     { "file": "land_lod2.gpkg", "orderNum": 2, "maxEdgeM": 20000, "maxBoundaryEdgeM": 20000 },
     { "file": "land_lod3.gpkg", "orderNum": 3, "maxEdgeM": 6000, "maxBoundaryEdgeM": 5000 },
-    { "file": "land_lod4.gpkg", "orderNum": 4, "maxEdgeM": 6000, "maxBoundaryEdgeM": 5000 }
+    { "file": "land_lod4.gpkg", "orderNum": 4, "maxEdgeM": 6000, "maxBoundaryEdgeM": 5000 },
+    { "file": "land_lod5.gpkg", "orderNum": 5, "maxEdgeM": 3000, "maxBoundaryEdgeM": 2000 }
   ],
   "fromHeightM": [
     { "orderNum": 0, "height": 5000000, "maxSpanDeg": 40, "minAreaDeg2": 0.5, "featureLimit": 4000 },
     { "orderNum": 1, "height": 2000000, "maxSpanDeg": 35, "minAreaDeg2": 0.5, "featureLimit": 4000 },
     { "orderNum": 2, "height": 1000000, "maxSpanDeg": 35, "minAreaDeg2": 0.4, "featureLimit": 4000 },
     { "orderNum": 3, "height": 500000, "maxSpanDeg": 12, "minAreaDeg2": 0.005, "featureLimit": 5000 },
-    { "orderNum": 4, "height": 200000, "maxSpanDeg": 8, "minAreaDeg2": 0, "featureLimit": 5000 }
+    { "orderNum": 4, "height": 200000, "maxSpanDeg": 4, "minAreaDeg2": 0, "featureLimit": 5000 },
+    { "orderNum": 5, "height": 100000, "maxSpanDeg": 2, "minAreaDeg2": 0, "featureLimit": 5000 }
   ]
 }
