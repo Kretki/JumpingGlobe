@@ -1,4 +1,4 @@
-import { LandLoader, type BBox } from "./land/loader";
+import { LandLoader, bboxContains, viewBBox, type BBox } from "./land/loader";
 import { WORLD_FILE, lodFileFromHeight } from "./land/lod.config";
 import type { LandMesh } from "./land/mesh";
 
@@ -275,6 +275,7 @@ function makeLandSlot(): LandSlot {
 const baseSlot = makeLandSlot();
 const detailSlot = makeLandSlot();
 let detailBBox: BBox | null = null;
+let loadedViewBBox: BBox | null = null;
 
 function padClipBBox(b: BBox, pad: number): BBox {
   const south = Math.max(-85, b.south + pad);
@@ -507,6 +508,7 @@ function clearDetail() {
   landLoader.evictDetail();
   clearSlot(detailSlot);
   detailBBox = null;
+  loadedViewBBox = null;
   lastLoadFile = WORLD_FILE;
   lastLoadLon = NaN;
   lastLoadLat = NaN;
@@ -531,12 +533,13 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
   }
   if (!baseReady) return;
 
+  const next = viewBBox(lon, lat, h);
   const moved =
-    Math.abs(lon - lastLoadLon) > 1.5 ||
-    Math.abs(lat - lastLoadLat) > 1.5 ||
-    Math.abs(Math.log(h) - Math.log(lastLoadH || h)) > 0.15 ||
     Number.isNaN(lastLoadLon) ||
-    file !== lastLoadFile;
+    file !== lastLoadFile ||
+    Math.abs(Math.log(h) - Math.log(lastLoadH || h)) > 0.15 ||
+    !loadedViewBBox ||
+    !bboxContains(loadedViewBBox, next, 0.25);
   if (!moved && detailSlot.indexCount > 0) return;
 
   if (lon === lastQueuedLon && lat === lastQueuedLat && h === lastQueuedH) return;
@@ -558,6 +561,7 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
     if (!result || result.file !== file) return;
     setLandProgress(98, "Uploading GPU buffers…", true);
     uploadSlot(detailSlot, result.mesh);
+    loadedViewBBox = result.bbox;
     detailBBox = padClipBBox(result.bbox, 0.5);
     lastLoadFile = result.file;
     landStatus = resultStatus("", result);
@@ -573,6 +577,7 @@ function disposeLand() {
   destroySlot(detailSlot);
   destroySlot(baseSlot);
   detailBBox = null;
+  loadedViewBBox = null;
   baseReady = false;
 }
 

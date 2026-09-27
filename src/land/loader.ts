@@ -82,6 +82,58 @@ export function viewBBox(
   return { west, south, east, north };
 }
 
+function lonSpan(b: BBox): number {
+  return b.west <= b.east ? b.east - b.west : 360 - (b.west - b.east);
+}
+
+function pointInBBox(lon: number, lat: number, b: BBox): boolean {
+  if (lat < b.south || lat > b.north) return false;
+  if (b.west <= b.east) return lon >= b.west && lon <= b.east;
+  return lon >= b.west || lon <= b.east;
+}
+
+function insetBBox(b: BBox, frac: number): BBox {
+  const latPad = (b.north - b.south) * frac;
+  const south = b.south + latPad;
+  const north = b.north - latPad;
+  const lonPad = lonSpan(b) * frac;
+  if (b.west <= b.east) {
+    return { west: b.west + lonPad, south, east: b.east - lonPad, north };
+  }
+  let west = b.west + lonPad;
+  let east = b.east - lonPad;
+  if (west > 180) west -= 360;
+  if (east < -180) east += 360;
+  return { west, south, east, north };
+}
+
+export function bboxContains(outer: BBox, inner: BBox, marginFrac = 0): boolean {
+  const o = marginFrac > 0 ? insetBBox(outer, marginFrac) : outer;
+  if (o.south >= o.north) return false;
+  const lons: number[] = [];
+  if (inner.west <= inner.east) {
+    lons.push(inner.west, inner.east);
+  } else {
+    lons.push(inner.west, 180, -180, inner.east);
+  }
+  for (const lon of lons) {
+    if (!pointInBBox(lon, inner.south, o) || !pointInBBox(lon, inner.north, o)) return false;
+  }
+  return true;
+}
+
+function parseBBoxKey(key: string): { file: string; bbox: BBox; minArea: string } | null {
+  const p = key.split("|");
+  if (p.length < 3) return null;
+  const c = p[1].split(",").map(Number);
+  if (c.length < 4 || c.some((n) => !Number.isFinite(n))) return null;
+  return {
+    file: p[0],
+    bbox: { west: c[0], south: c[1], east: c[2], north: c[3] },
+    minArea: p[2],
+  };
+}
+
 function bboxKey(b: BBox, file: string, minArea: number): string {
   const q = (n: number) => n.toFixed(2);
   return `${file}|${q(b.west)},${q(b.south)},${q(b.east)},${q(b.north)}|${minArea.toFixed(4)}`;
@@ -563,15 +615,10 @@ export class LandLoader {
   }
 
   private similarKey(a: string, b: string): boolean {
-    const pa = a.split("|");
-    const pb = b.split("|");
-    if (pa.length < 3 || pb.length < 3) return false;
-    if (pa[0] !== pb[0] || pa[2] !== pb[2]) return false;
-    const ba = pa[1].split(",").map(Number);
-    const bb = pb[1].split(",").map(Number);
-    for (let i = 0; i < 4; i++) {
-      if (Math.abs(ba[i] - bb[i]) > 2.5) return false;
-    }
-    return true;
+    const pa = parseBBoxKey(a);
+    const pb = parseBBoxKey(b);
+    if (!pa || !pb) return false;
+    if (pa.file !== pb.file || pa.minArea !== pb.minArea) return false;
+    return bboxContains(pa.bbox, pb.bbox, 0);
   }
 }

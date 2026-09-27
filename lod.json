@@ -1,5 +1,5 @@
 {
-  "dataDir": "public/data/Ma_1",
+  "dataDir": "public/data/Ma_0",
   "worldFile": "land_lod0.gpkg",
   "fullResolutionFile": "land_polygons.gpkg",
   "bands": [
