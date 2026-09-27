@@ -1,15 +1,57 @@
-# 1. stay in shapefile / GPKG — never materialize 2 GiB GeoJSON
+#!/usr/bin/env bash
+set -eu
+
+zip_path="${1:?usage: $0 <zip> <dir>}"
+dest_dir="${2:?usage: $0 <zip> <dir>}"
+
+[ -f "$zip_path" ] || { printf 'not a zip ile: %s\n' "$zip_path" >&2; exit 1; }
+
+zip_base="$(basename -- "$zip_path")"
+name="${zip_base%.*}"
+dest_dir="${dest_dir%/}"
+out_dir="${dest_dir%/}/${name}"
+
+mkdir -p -- "$dest_dir"
+cp -- "$zip_path" "${dest_dir%/}/${zip_base}"
+
+printf "Unzip stage\n"
+
+unzip -o -- "${dest_dir%/}/${zip_base}" -d "$dest_dir" > /dev/null
+
+rm "${dest_dir%/}/${zip_base}"
+
+printf "Parse shp stage\n"
+
 ogr2ogr -f GPKG -t_srs EPSG:4326 \
   -nlt MULTIPOLYGON -lco SPATIAL_INDEX=YES \
-  land.gpkg land_polygons.shp
+  "${dest_dir%/}/land.gpkg" \
+  "${dest_dir%/}/${zip_base%.*}/land_polygons.shp" \
+  -progress
 
-# 2. far-field LOD (globe)
-ogr2ogr -f GPKG land_lod0.gpkg land.gpkg \
-  -simplify 0.15          # degrees; tune
-# mid
-ogr2ogr -f GPKG land_lod1.gpkg land.gpkg -simplify 0.03
-# near-coast, still not full OSM
-ogr2ogr -f GPKG land_lod2.gpkg land.gpkg -simplify 0.005
+printf "LOD0 stage\n"
 
-# 3. optional: FlatGeobuf if you want seekable rings
-ogr2ogr -f FlatGeobuf land_lod1.fgb land_lod1.gpkg
+ogr2ogr -f GPKG \
+  "${dest_dir%/}/land_lod0.gpkg" "${dest_dir%/}/land.gpkg" \
+  -simplify 0.10 -progress --config CPL_LOG /dev/null
+
+printf "LOD1 stage\n"
+
+ogr2ogr -f GPKG \
+  "${dest_dir%/}/land_lod1.gpkg" "${dest_dir%/}/land.gpkg" \
+  -simplify 0.03 -progress --config CPL_LOG /dev/null
+
+printf "LOD2 stage\n"
+
+ogr2ogr -f GPKG \
+  "${dest_dir%/}/land_lod2.gpkg" "${dest_dir%/}/land.gpkg" \
+  -simplify 0.005 -progress --config CPL_LOG /dev/null
+
+printf "LOD3 stage\n"
+
+ogr2ogr -f GPKG \
+  "${dest_dir%/}/land_lod3.gpkg" "${dest_dir%/}/land.gpkg" \
+  -simplify 0.001 -progress --config CPL_LOG /dev/null
+
+printf "Removing unzipped folder\n"
+
+rm -r "${dest_dir%/}/${zip_base%.*}"
