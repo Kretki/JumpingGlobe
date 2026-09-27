@@ -9,7 +9,7 @@ import {
 
 export type MeshWorkerRequest = {
   seq: number;
-  lod: 0 | 1 | 2;
+  lod: number;
   fc: GeoJsonFeatureCollection;
   bbox?: MeshBBox;
   heightM?: number;

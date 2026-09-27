@@ -32,7 +32,7 @@ printf "LOD0 stage\n"
 
 ogr2ogr -f GPKG \
   "${dest_dir%/}/land_lod0.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.10 -progress --config CPL_LOG /dev/null
+  -simplify 0.08 -progress --config CPL_LOG /dev/null
 
 printf "LOD1 stage\n"
 
@@ -44,13 +44,26 @@ printf "LOD2 stage\n"
 
 ogr2ogr -f GPKG \
   "${dest_dir%/}/land_lod2.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.005 -progress --config CPL_LOG /dev/null
+  -simplify 0.01 -progress --config CPL_LOG /dev/null
 
 printf "LOD3 stage\n"
 
 ogr2ogr -f GPKG \
   "${dest_dir%/}/land_lod3.gpkg" "${dest_dir%/}/land.gpkg" \
+  -simplify 0.005 -progress --config CPL_LOG /dev/null
+
+printf "LOD4 stage\n"
+
+ogr2ogr -f GPKG \
+  "${dest_dir%/}/land_lod4.gpkg" "${dest_dir%/}/land.gpkg" \
   -simplify 0.001 -progress --config CPL_LOG /dev/null
+
+printf "LOD5 stage\n"
+
+ogr2ogr -f GPKG \
+  "${dest_dir%/}/land_lod5.gpkg" "${dest_dir%/}/land.gpkg" \
+  -simplify 0.0001 -progress --config CPL_LOG /dev/null
+
 
 printf "Removing unnecessary data\n"
 

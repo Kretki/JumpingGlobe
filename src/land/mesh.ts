@@ -1,12 +1,10 @@
 /** Build ECEF triangle meshes from EPSG:4326 GeoJSON land polygons. */
 
 import earcut from "earcut";
-import { meshLodFromHeight } from "./lod.config";
+import { maxBoundaryEdgeMFromOrderNum, maxEdgeMFromOrderNum, meshLodFromHeight } from "./lod.config";
 import {
   ENU_MIN_EXTENT_M,
   LAND_HEIGHT_M,
-  MAX_BOUNDARY_EDGE_M,
-  MAX_EDGE_M,
   WGS84_A,
   densifyRingGeodesic,
   geodesicPoint,
@@ -676,14 +674,14 @@ function appendPiece(
   exterior: LonLat[],
   holes: LonLat[][],
   pole: PoleKind,
-  lod: 0 | 1 | 2,
+  lod: number,
   positions: number[],
   normals: number[],
   indices: number[],
   stats: MeshStats
 ): number {
-  const boundaryMax = MAX_BOUNDARY_EDGE_M[lod];
-  const edgeMax = MAX_EDGE_M[lod];
+  const boundaryMax = maxBoundaryEdgeMFromOrderNum(lod);
+  const edgeMax = maxEdgeMFromOrderNum(lod);
   const result = triangulatePiece(exterior, holes, pole, boundaryMax, stats);
   if (!result) return 0;
 
@@ -736,7 +734,7 @@ function appendPiece(
 
 function processPolygonRings(
   rings: number[][][],
-  lod: 0 | 1 | 2,
+  lod: number,
   positions: number[],
   normals: number[],
   indices: number[],
@@ -779,7 +777,7 @@ export type MeshBuildOpts = {
 /** Convert a FeatureCollection (EPSG:4326) into a single ECEF mesh. */
 export function featureCollectionToMesh(
   fc: GeoJsonFeatureCollection,
-  lod: 0 | 1 | 2 = 0,
+  lod = 0,
   onProgress?: MeshProgressFn,
   opts?: MeshBuildOpts
 ): LandMesh {

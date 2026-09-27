@@ -11,20 +11,6 @@ export const WGS84_E2 = WGS84_F * (2 - WGS84_F);
 /** Radial offset after geometry is constrained. Z-fight only. */
 export const LAND_HEIGHT_M = 12;
 
-/** Max ellipsoid chord after all splits. Sagitta s ≈ R α²/2 < ~10 m. */
-export const MAX_EDGE_M: Record<0 | 1 | 2, number> = {
-  0: 25000,
-  1: 12000,
-  2: 6000,
-};
-
-/** Boundary sample cap (geodesic, metres), independent of interior split. */
-export const MAX_BOUNDARY_EDGE_M: Record<0 | 1 | 2, number> = {
-  0: 25000,
-  1: 10000,
-  2: 5000,
-};
-
 export const MAX_BOUNDARY_SUBDIV = 256;
 export const ANTIMERIDIAN_EPS_DEG = 1e-9;
 export const POLE_LAT_DEG = 89.999;

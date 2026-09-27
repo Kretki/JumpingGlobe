@@ -4,7 +4,6 @@
  */
 
 import {
-  MAX_EDGE_M,
   ecefToLonLat,
   geodesicPoint,
   lonLatToEcef,
@@ -12,6 +11,7 @@ import {
   unwrapRingLons,
   unwrappedLonSpan,
 } from "./project";
+import { maxEdgeMFromOrderNum } from "./lod.config";
 import { featureCollectionToMesh, splitLongEdges as splitEdges } from "./mesh";
 import type { GeoJsonFeatureCollection } from "./mesh";
 
@@ -64,8 +64,8 @@ function assert(cond: boolean, msg: string) {
   const p2 = lonLatToEcef(0, 5, 12);
   positions.push(...p0, ...p1, ...p2);
   indices.push(0, 1, 2);
-  const { maxEdge } = splitEdges(positions, indices, MAX_EDGE_M[0], 12);
-  assert(maxEdge <= MAX_EDGE_M[0] * 1.05, `maxEdge ${maxEdge} ≤ budget`);
+  const { maxEdge } = splitEdges(positions, indices, maxEdgeMFromOrderNum(0), 12);
+  assert(maxEdge <= maxEdgeMFromOrderNum(0) * 1.05, `maxEdge ${maxEdge} ≤ budget`);
   assert(indices.length / 3 > 1, "edge split produced more triangles");
 }
 
@@ -95,7 +95,7 @@ function assert(cond: boolean, msg: string) {
   assert(mesh.triangleCount > 0, "simple polygon produces triangles");
   assert(mesh.stats.earcutEmpty + mesh.stats.earcutThrow === 0, "no earcut failures on simple poly");
   assert(
-    mesh.stats.maxEdgeMObserved <= MAX_EDGE_M[0] * 1.05,
+    mesh.stats.maxEdgeMObserved <= maxEdgeMFromOrderNum(0) * 1.05,
     `maxEdge observed ${mesh.stats.maxEdgeMObserved}`
   );
 

@@ -5,19 +5,22 @@ import type { MeshWorkerRequest, MeshWorkerResponse } from "./meshWorker";
 import {
   WORLD_BBOX,
   WORLD_FILE,
+  featureLimitFromHeight,
   lodFileFromHeight,
   maxSpanFromHeight,
   meshLodFromFile,
-  meshLodFromHeight,
+  minAreaFromHeight,
   type LandLod,
 } from "./lod.config";
 
 export {
+  featureLimitFromHeight,
   lodFileFromHeight,
   lodFromHeight,
   maxSpanFromHeight,
   meshLodFromFile,
   meshLodFromHeight,
+  minAreaFromHeight,
   WORLD_FILE,
   WORLD_BBOX,
 } from "./lod.config";
@@ -46,20 +49,6 @@ export type LandProgressFn = (p: LandLoadProgress) => void;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
-}
-
-export function minAreaFromHeight(heightM: number): number {
-  if (heightM > 8_000_000) return 0.5;
-  if (heightM > 3_000_000) return 0.05;
-  if (heightM > 1_000_000) return 0.005;
-  if (heightM > 300_000) return 0.0005;
-  return 0;
-}
-
-export function featureLimitFromHeight(heightM: number): number {
-  if (heightM > 3_000_000) return 4_000;
-  if (heightM > 1_000_000) return 5_000;
-  return 6_000;
 }
 
 export function viewBBox(
