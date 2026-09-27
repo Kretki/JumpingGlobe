@@ -1,4 +1,4 @@
-import { LandLoader } from "./land/loader";
+import { LandLoader, type BBox } from "./land/loader";
 import { WORLD_FILE, lodFileFromHeight } from "./land/lod.config";
 import type { LandMesh } from "./land/mesh";
 
@@ -42,8 +42,22 @@ varying vec3 vWorldPos;
 uniform vec3 uLightPos;
 uniform vec3 uCameraPos;
 uniform vec3 uBaseColor;
+uniform float uClipLand;
+uniform vec4 uClipBBox;
 
 void main() {
+  if (uClipLand > 0.5) {
+    float lon = atan(vWorldPos.y, vWorldPos.x) * 57.2957795;
+    float lat = atan(vWorldPos.z, length(vWorldPos.xy)) * 57.2957795;
+    float west = uClipBBox.x;
+    float south = uClipBBox.y;
+    float east = uClipBBox.z;
+    float north = uClipBBox.w;
+    bool inLat = lat >= south && lat <= north;
+    bool inLon = west <= east ? (lon >= west && lon <= east) : (lon >= west || lon <= east);
+    if (inLat && inLon) discard;
+  }
+
   vec3 n = normalize(vNormal);
   vec3 l = normalize(uLightPos - vWorldPos);
   vec3 v = normalize(uCameraPos - vWorldPos);
@@ -260,6 +274,27 @@ function makeLandSlot(): LandSlot {
 
 const baseSlot = makeLandSlot();
 const detailSlot = makeLandSlot();
+let detailBBox: BBox | null = null;
+
+function padClipBBox(b: BBox, pad: number): BBox {
+  const south = Math.max(-85, b.south + pad);
+  const north = Math.min(85, b.north - pad);
+  if (b.west <= b.east) {
+    if (b.east - b.west + 2 * pad >= 359) {
+      return { west: -180, south, east: 180, north };
+    }
+    let west = b.west + pad;
+    let east = b.east - pad;
+    if (west < -180) west += 360;
+    if (east > 180) east -= 360;
+    return { west, south, east, north };
+  }
+  let west = b.west + pad;
+  let east = b.east - pad;
+  if (west < -180) west += 360;
+  if (east > 180) east -= 360;
+  return { west, south, east, north };
+}
 
 function uploadSlot(slot: LandSlot, mesh: LandMesh) {
   gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.pos);
@@ -296,6 +331,8 @@ const uModel = gl.getUniformLocation(program, "uModel");
 const uLightPos = gl.getUniformLocation(program, "uLightPos");
 const uCameraPos = gl.getUniformLocation(program, "uCameraPos");
 const uBaseColor = gl.getUniformLocation(program, "uBaseColor");
+const uClipLand = gl.getUniformLocation(program, "uClipLand");
+const uClipBBox = gl.getUniformLocation(program, "uClipBBox");
 
 let yaw = 0.6;
 let pitch = 0.35;
@@ -469,6 +506,7 @@ function clearDetail() {
   landLoader.cancelView();
   landLoader.evictDetail();
   clearSlot(detailSlot);
+  detailBBox = null;
   lastLoadFile = WORLD_FILE;
   lastLoadLon = NaN;
   lastLoadLat = NaN;
@@ -520,6 +558,7 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
     if (!result || result.file !== file) return;
     setLandProgress(98, "Uploading GPU buffers…", true);
     uploadSlot(detailSlot, result.mesh);
+    detailBBox = padClipBBox(result.bbox, 0.5);
     lastLoadFile = result.file;
     landStatus = resultStatus("", result);
     setLandProgress(100, landStatus, true);
@@ -533,6 +572,7 @@ function disposeLand() {
   landLoader.dispose();
   destroySlot(detailSlot);
   destroySlot(baseSlot);
+  detailBBox = null;
   baseReady = false;
 }
 
@@ -557,7 +597,8 @@ function drawMesh(
   color: [number, number, number],
   mvp: Mat4,
   model: Mat4,
-  eye: number[]
+  eye: number[],
+  clip: BBox | null = null
 ) {
   gl!.bindBuffer(gl!.ARRAY_BUFFER, pos);
   gl!.enableVertexAttribArray(aPosition);
@@ -573,6 +614,12 @@ function drawMesh(
   gl!.uniform3f(uLightPos, WGS84_A * 2, WGS84_A * 1.5, WGS84_A * 3);
   gl!.uniform3f(uCameraPos, eye[0], eye[1], eye[2]);
   gl!.uniform3f(uBaseColor, color[0], color[1], color[2]);
+  if (clip) {
+    gl!.uniform1f(uClipLand, 1);
+    gl!.uniform4f(uClipBBox, clip.west, clip.south, clip.east, clip.north);
+  } else {
+    gl!.uniform1f(uClipLand, 0);
+  }
   gl!.drawElements(gl!.TRIANGLES, indexCount, indexType, 0);
 }
 
@@ -612,22 +659,40 @@ function frame() {
     eye
   );
 
-  const land = detailSlot.indexCount > 0 ? detailSlot : baseSlot;
-  if (land.indexCount > 0) {
-    gl!.enable(gl!.CULL_FACE);
-    gl!.frontFace(gl!.CCW);
-    gl!.cullFace(gl!.BACK);
+  gl!.enable(gl!.CULL_FACE);
+  gl!.frontFace(gl!.CCW);
+  gl!.cullFace(gl!.BACK);
+  if (baseSlot.indexCount > 0) {
+    const clip =
+      detailSlot.indexCount > 0 && detailBBox ? detailBBox : null;
     drawMesh(
-      land.pos,
-      land.nrm,
-      land.idx,
-      land.indexCount,
+      baseSlot.pos,
+      baseSlot.nrm,
+      baseSlot.idx,
+      baseSlot.indexCount,
       gl!.UNSIGNED_INT,
       [0.28, 0.62, 0.32],
       mvp,
       model,
+      eye,
+      clip
+    );
+  }
+  if (detailSlot.indexCount > 0) {
+    gl!.enable(gl!.POLYGON_OFFSET_FILL);
+    gl!.polygonOffset(-1, -1);
+    drawMesh(
+      detailSlot.pos,
+      detailSlot.nrm,
+      detailSlot.idx,
+      detailSlot.indexCount,
+      gl!.UNSIGNED_INT,
+      [0.32, 0.72, 0.36],
+      mvp,
+      model,
       eye
     );
+    gl!.disable(gl!.POLYGON_OFFSET_FILL);
   }
 
   requestAnimationFrame(frame);
