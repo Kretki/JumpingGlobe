@@ -52,6 +52,8 @@ ogr2ogr -f GPKG \
   "${dest_dir%/}/land_lod3.gpkg" "${dest_dir%/}/land.gpkg" \
   -simplify 0.001 -progress --config CPL_LOG /dev/null
 
-printf "Removing unzipped folder\n"
+printf "Removing unnecessary data\n"
 
 rm -r "${dest_dir%/}/${zip_base%.*}"
+
+rm "${dest_dir%/}/land.gpkg"

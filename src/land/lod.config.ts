@@ -1,6 +1,6 @@
 import lodJson from "../../lod.json";
 
-export type LandLod = 0 | 1 | 2;
+export type LandLod = number;
 
 export type LodHeightBand = {
   file: string;
@@ -42,12 +42,12 @@ export function meshLodFromFile(file: string): LandLod {
   const byName = LOD_HEIGHT_BANDS.find((b) => b.file === file);
   if (byName) {
     const n = byName.orderNum;
-    if (n === 0 || n === 1 || n === 2) return n;
+    if (Number.isFinite(n)) return n as LandLod;
   }
   const m = /lod(\d+)/i.exec(file);
   if (m) {
     const n = Number(m[1]);
-    if (n === 0 || n === 1 || n === 2) return n;
+    if (Number.isFinite(n)) return n as LandLod;
   }
   return 0;
 }

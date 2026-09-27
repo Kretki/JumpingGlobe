@@ -547,7 +547,7 @@ export class LandLoader {
     kind: PendingKind,
     seq: number,
     key: string,
-    lod: 0 | 1 | 2,
+    lod: number,
     file: string,
     fc: GeoJsonFeatureCollection,
     count: number,
