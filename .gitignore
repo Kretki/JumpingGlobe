@@ -28,6 +28,7 @@ lerna-debug.log*
 !.env.example
 *.pem
 *.key
+.venv
 
 # Test / coverage
 coverage/
@@ -68,7 +69,7 @@ tmp/
 temp/
 
 #External heavy data
-public/data/Ma*
+public/data/lods*
 
 #Python runtime files
 *.pyc

@@ -1,72 +1,67 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 zip_path="${1:?usage: $0 <zip> <dir>}"
 dest_dir="${2:?usage: $0 <zip> <dir>}"
 
-[ -f "$zip_path" ] || { printf 'not a zip ile: %s\n' "$zip_path" >&2; exit 1; }
+[ -f "$zip_path" ] || { printf 'not a zip file: %s\n' "$zip_path" >&2; exit 1; }
 
 zip_base="$(basename -- "$zip_path")"
 name="${zip_base%.*}"
 dest_dir="${dest_dir%/}"
-out_dir="${dest_dir%/}/${name}"
+work="${dest_dir}/.lod_work"
 
-mkdir -p -- "$dest_dir"
-cp -- "$zip_path" "${dest_dir%/}/${zip_base}"
+mkdir -p -- "$dest_dir" "$work"
+cp -- "$zip_path" "${dest_dir}/${zip_base}"
 
-printf "Unzip stage\n"
+printf 'Unzip stage\n'
+unzip -o -- "${dest_dir}/${zip_base}" -d "$dest_dir" > /dev/null
+rm -f -- "${dest_dir}/${zip_base}"
 
-unzip -o -- "${dest_dir%/}/${zip_base}" -d "$dest_dir" > /dev/null
+shp="${dest_dir}/${name}/land_polygons.shp"
+[ -f "$shp" ] || { printf 'missing shapefile: %s\n' "$shp" >&2; exit 1; }
 
-rm "${dest_dir%/}/${zip_base}"
-
-printf "Parse shp stage\n"
-
+printf 'Convert to gpkg stage\n'
 ogr2ogr -f GPKG -t_srs EPSG:4326 \
-  -nlt MULTIPOLYGON -lco SPATIAL_INDEX=YES \
-  "${dest_dir%/}/land.gpkg" \
-  "${dest_dir%/}/${zip_base%.*}/land_polygons.shp" \
+  -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY -lco SPATIAL_INDEX=YES \
+  "${work}/land.gpkg" "$shp" \
   -progress
 
-printf "LOD0 stage\n"
+printf 'Metre master stage (EPSG:4087)\n'
+ogr2ogr -f GPKG -t_srs EPSG:4087 \
+  -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY -lco SPATIAL_INDEX=YES \
+  "${work}/land_4087.gpkg" "${work}/land.gpkg" \
+  -progress
 
-ogr2ogr -f GPKG \
-  "${dest_dir%/}/land_lod0.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.08 -progress --config CPL_LOG /dev/null
+write_lod() {
+  local lod="$1" tol_m="$2"
+  printf 'LOD%s stage (simplify %sm, segmentize %sm)\n' "$lod" "$tol_m" "$tol_m"
 
-printf "LOD1 stage\n"
+  ogr2ogr -f GPKG \
+    -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY -makevalid \
+    "${work}/lod${lod}_4087.gpkg" "${work}/land_4087.gpkg" \
+    -simplify "$tol_m" -progress
 
-ogr2ogr -f GPKG \
-  "${dest_dir%/}/land_lod1.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.03 -progress --config CPL_LOG /dev/null
+  ogr2ogr -f GPKG \
+    -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY \
+    "${work}/lod${lod}_seg.gpkg" "${work}/lod${lod}_4087.gpkg" \
+    -segmentize "$tol_m" -progress
 
-printf "LOD2 stage\n"
+  ogr2ogr -f GPKG \
+    -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY \
+    -t_srs EPSG:4326 -wrapdateline -makevalid -lco SPATIAL_INDEX=YES \
+    "${dest_dir}/land_lod${lod}.gpkg" "${work}/lod${lod}_seg.gpkg" \
+    -progress
 
-ogr2ogr -f GPKG \
-  "${dest_dir%/}/land_lod2.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.01 -progress --config CPL_LOG /dev/null
+  rm -f -- "${work}/lod${lod}_4087.gpkg" "${work}/lod${lod}_seg.gpkg"
+}
 
-printf "LOD3 stage\n"
+write_lod 0 8906
+write_lod 1 3340
+write_lod 2 1113
+write_lod 3 557
+write_lod 4 225
+write_lod 5 111
 
-ogr2ogr -f GPKG \
-  "${dest_dir%/}/land_lod3.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.005 -progress --config CPL_LOG /dev/null
-
-printf "LOD4 stage\n"
-
-ogr2ogr -f GPKG \
-  "${dest_dir%/}/land_lod4.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.001 -progress --config CPL_LOG /dev/null
-
-printf "LOD5 stage\n"
-
-ogr2ogr -f GPKG \
-  "${dest_dir%/}/land_lod5.gpkg" "${dest_dir%/}/land.gpkg" \
-  -simplify 0.0001 -progress --config CPL_LOG /dev/null
-
-
-printf "Removing unnecessary data\n"
-
-rm -r "${dest_dir%/}/${zip_base%.*}"
-
-rm "${dest_dir%/}/land.gpkg"
+printf 'Removing unnecessary data\n'
+rm -rf -- "$work" "${dest_dir}/${name}"

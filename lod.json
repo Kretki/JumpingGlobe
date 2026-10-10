@@ -1,7 +1,7 @@
 {
-  "dataDir": "public/data/Ma_0",
+  "dataDir": "public/data/lods",
   "worldFile": "land_lod0.gpkg",
-  "fullResolutionFile": "land_polygons.gpkg",
+  "fullResolutionFile": "land_lod5.gpkg",
   "bands": [
     { "file": "land_lod0.gpkg", "orderNum": 0, "maxEdgeM": 25000, "maxBoundaryEdgeM": 25000 },
     { "file": "land_lod1.gpkg", "orderNum": 1, "maxEdgeM": 25000, "maxBoundaryEdgeM": 25000 },
