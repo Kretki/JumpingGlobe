@@ -317,6 +317,8 @@ export class LandLoader {
       positions: data.positions,
       normals: data.normals,
       indices: data.indices,
+      groupIdx: data.groupIdx,
+      groups: data.groups,
       featureCount: data.featureCount,
       triangleCount: data.triangleCount,
       stats: data.stats,
@@ -347,18 +349,19 @@ export class LandLoader {
     return this.worldResult;
   }
 
-  async loadWorld(): Promise<LandLoadResult | null> {
+  /** Whole-world layer (the LOD0 base by default; also used for the continental-crust layer). */
+  async loadWorld(file = WORLD_FILE, minArea = 0.5, limit = 8_000): Promise<LandLoadResult | null> {
     if (this.disposed) return null;
-    if (this.worldResult) {
+    if (this.worldResult && this.worldResult.file === file) {
       this.emit({ percent: 100, phase: "done", label: "Cached" });
       return this.worldResult;
     }
     return this.fetchAndMesh({
       kind: "world",
-      file: WORLD_FILE,
+      file,
       bbox: WORLD_BBOX,
-      minArea: 0.5,
-      limit: 8_000,
+      minArea,
+      limit,
     });
   }
 

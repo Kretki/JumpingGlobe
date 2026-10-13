@@ -29,7 +29,7 @@
       #hint {
         position: fixed;
         left: 16px;
-        bottom: 16px;
+        bottom: 104px;
         color: #9aa4b2;
         font: 14px/1.4 system-ui, sans-serif;
         pointer-events: none;
@@ -107,6 +107,93 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      #timeline {
+        position: fixed;
+        left: 16px;
+        right: 16px;
+        bottom: 16px;
+        color: #c5d0de;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: rgba(11, 15, 20, 0.82);
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid rgba(154, 164, 178, 0.25);
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 6px 14px;
+      }
+      #timeline button {
+        font: inherit;
+        color: #e8eef7;
+        background: rgba(125, 211, 167, 0.14);
+        border: 1px solid rgba(125, 211, 167, 0.45);
+        border-radius: 6px;
+        padding: 4px 12px;
+        cursor: pointer;
+        min-width: 84px;
+      }
+      #timeline button:hover {
+        background: rgba(125, 211, 167, 0.26);
+      }
+      #timeline button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #tl-age {
+        width: 100%;
+        accent-color: #7dd3a7;
+        cursor: pointer;
+      }
+      #tl-readout {
+        color: #e8eef7;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        /* fixed width: the slider must not resize while the label changes */
+        width: 22ch;
+        text-align: right;
+        white-space: nowrap;
+      }
+      #tl-scale {
+        grid-column: 2;
+        display: flex;
+        justify-content: space-between;
+        color: #9aa4b2;
+        font-size: 11px;
+        margin-top: -6px;
+      }
+      #tl-options {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 18px;
+        align-items: center;
+        color: #9aa4b2;
+        font-size: 12px;
+      }
+      #tl-options select,
+      #tl-options input {
+        font: inherit;
+        accent-color: #7dd3a7;
+      }
+      #tl-options select {
+        color: #e8eef7;
+        background: #0b0f14;
+        border: 1px solid rgba(154, 164, 178, 0.3);
+        border-radius: 4px;
+      }
+      #tl-status {
+        margin-left: auto;
+        color: #e0b872;
+      }
+      #tl-status:empty {
+        display: none;
+      }
+      @media (max-width: 560px) {
+        #hint {
+          display: none;
+        }
+      }
     </style>
   </head>
   <body>
@@ -120,7 +207,25 @@
       <div class="bar"><i id="land-progress-fill"></i></div>
       <div class="label" id="land-progress-label">Idle</div>
     </div>
-    <div id="hint">Drag to orbit · Scroll to zoom (50 m – 2×10⁷ m) · Land LODs via /api</div>
+    <div id="timeline" aria-label="Plate reconstruction timeline">
+      <button id="tl-play" type="button" disabled>▶ Play</button>
+      <input id="tl-age" type="range" min="0" max="1140" step="1" value="1140" disabled aria-label="Timeline from the past (left) to the present (right)" />
+      <output id="tl-readout" for="tl-age">0 Ma</output>
+      <div id="tl-scale"><span id="tl-max">1140 Ma</span><span>Present</span></div>
+      <div id="tl-options">
+        <label>Speed
+          <select id="tl-speed">
+            <option value="5">5 Myr/s</option>
+            <option value="20" selected>20 Myr/s</option>
+            <option value="50">50 Myr/s</option>
+            <option value="100">100 Myr/s</option>
+          </select>
+        </label>
+        <label><input id="tl-crust" type="checkbox" checked /> Continental crust</label>
+        <span id="tl-status" aria-live="polite">Loading rotation model…</span>
+      </div>
+    </div>
+    <div id="hint">Drag to orbit · Scroll to zoom (50 m – 2×10⁷ m) · Land LODs via /api · ←/→ step the timeline (→ toward present)</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

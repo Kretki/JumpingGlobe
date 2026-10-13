@@ -15,6 +15,7 @@ Run:
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -23,14 +24,41 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 try:
     from server.gpkg_reader import LandGpkgStore
-    from server.lod_config import DATA_DIR, FULL_RESOLUTION_FILE, ROOT, WORLD_FILE
+    from server.lod_config import (
+        CONTINENTS_FILE,
+        PLATE_WORLD_FILE,
+        DATA_DIR,
+        FULL_RESOLUTION_FILE,
+        ROOT,
+        ROTATION_FILE,
+        WORLD_FILE,
+    )
+    from server.plate_data import PlateData
+    from server.rotation import parse_rot
 except ImportError:  # running as `python app.py` inside server/
     from gpkg_reader import LandGpkgStore
-    from lod_config import DATA_DIR, FULL_RESOLUTION_FILE, ROOT, WORLD_FILE
+    from lod_config import (
+        CONTINENTS_FILE,
+        PLATE_WORLD_FILE,
+        DATA_DIR,
+        FULL_RESOLUTION_FILE,
+        ROOT,
+        ROTATION_FILE,
+        WORLD_FILE,
+    )
+    from plate_data import PlateData
+    from rotation import parse_rot
 
 store = LandGpkgStore(DATA_DIR)
 
-app = FastAPI(title="Land GPKG API", version="1.0.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Build the plate layers in the background on first start (non-blocking).
+    plate_data.ensure()
+    yield
+
+
+app = FastAPI(title="Land GPKG API", version="1.0.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,6 +80,42 @@ def _land_json(
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "data_dir": str(DATA_DIR), "lods": store.available_lods()}
+
+
+@lru_cache(maxsize=1)
+def _rotations_json(mtime_ns: int) -> bytes:
+    model = parse_rot(ROTATION_FILE)
+    model["anchorPlate"] = 0
+    return json.dumps(model, separators=(",", ":")).encode("utf-8")
+
+
+def _plate_data_rebuilt() -> None:
+    _land_json.cache_clear()
+
+
+plate_data = PlateData(on_rebuilt=_plate_data_rebuilt)
+
+
+@app.get("/api/rotations")
+def rotations() -> Response:
+    """Merdith et al. 2021 rotation model: total poles per moving plate (file order)."""
+    if not ROTATION_FILE.is_file():
+        raise HTTPException(status_code=404, detail=f"Rotation file not found: {ROTATION_FILE.name}")
+    body = _rotations_json(ROTATION_FILE.stat().st_mtime_ns)
+    return Response(content=body, media_type="application/json")
+
+
+@app.get("/api/plates/status")
+def plates_status() -> dict:
+    """Readiness of the plate layers; the client polls this while they are built."""
+    plate_data.ensure()
+    ready = plate_data.status == "ready"
+    return {
+        "status": plate_data.status,
+        "detail": plate_data.detail,
+        "plateWorldFile": PLATE_WORLD_FILE if ready else None,
+        "continentsFile": CONTINENTS_FILE if ready else None,
+    }
 
 
 @app.get("/api/land/stats")

@@ -5,6 +5,7 @@ import {
   type GeoJsonFeatureCollection,
   type MeshBBox,
   type MeshStats,
+  type PlateGroup,
 } from "./mesh";
 
 export type MeshWorkerRequest = {
@@ -32,6 +33,8 @@ export type MeshWorkerResponse =
       positions: Float32Array;
       normals: Float32Array;
       indices: Uint32Array;
+      groupIdx: Uint16Array;
+      groups: PlateGroup[];
       featureCount: number;
       triangleCount: number;
       stats: MeshStats;
@@ -75,6 +78,8 @@ self.onmessage = (ev: MessageEvent<MeshWorkerRequest>) => {
       positions: mesh.positions,
       normals: mesh.normals,
       indices: mesh.indices,
+      groupIdx: mesh.groupIdx,
+      groups: mesh.groups,
       featureCount: mesh.featureCount,
       triangleCount: mesh.triangleCount,
       stats: mesh.stats,
@@ -83,6 +88,7 @@ self.onmessage = (ev: MessageEvent<MeshWorkerRequest>) => {
       mesh.positions.buffer as ArrayBuffer,
       mesh.normals.buffer as ArrayBuffer,
       mesh.indices.buffer as ArrayBuffer,
+      mesh.groupIdx.buffer as ArrayBuffer,
     ];
     (self as unknown as Worker).postMessage(res, transfer);
   } catch (err) {

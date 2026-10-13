@@ -173,13 +173,18 @@ class LandGpkgStore:
     def _conn(self, name: str) -> sqlite3.Connection:
         if not hasattr(self._local, "conns"):
             self._local.conns = {}
-        conns: dict[str, sqlite3.Connection] = self._local.conns
-        if name not in conns:
-            path = self.resolve_file(name)
+        conns: dict[str, tuple[int, sqlite3.Connection]] = self._local.conns
+        path = self.resolve_file(name)
+        mtime = path.stat().st_mtime_ns
+        cached = conns.get(name)
+        if cached is None or cached[0] != mtime:
+            # File replaced (e.g. plate layers rebuilt): reopen instead of reading the old inode.
+            if cached is not None:
+                cached[1].close()
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
             conn.row_factory = sqlite3.Row
-            conns[name] = conn
-        return conns[name]
+            conns[name] = (mtime, conn)
+        return conns[name][1]
 
     def query_bbox(
         self,
@@ -215,7 +220,7 @@ class LandGpkgStore:
                 break
             remaining = limit - len(features)
             rows = self._query_box(conn, w, s, e, n, remaining, min_area)
-            for fid, geom_blob in rows:
+            for fid, geom_blob, plate in rows:
                 if fid in seen:
                     continue
                 seen.add(fid)
@@ -226,7 +231,7 @@ class LandGpkgStore:
                     {
                         "type": "Feature",
                         "id": fid,
-                        "properties": {"fid": fid, "file": file},
+                        "properties": {"fid": fid, "file": file, **plate},
                         "geometry": geometry,
                     }
                 )
@@ -242,6 +247,11 @@ class LandGpkgStore:
             "features": features,
         }
 
+    def _plate_columns(self, conn: sqlite3.Connection) -> bool:
+        """True when the file was plate-tagged by tools/plate_tag.py."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(land_polygons)")}
+        return {"plate_id", "from_age", "to_age", "src_env_area"} <= cols
+
     def _query_box(
         self,
         conn: sqlite3.Connection,
@@ -251,7 +261,34 @@ class LandGpkgStore:
         north: float,
         limit: int,
         min_area: float,
-    ) -> list[tuple[int, bytes]]:
+    ) -> list[tuple[int, bytes, dict[str, Any]]]:
+        if self._plate_columns(conn):
+            # Plate pieces are filtered/sorted by their ORIGINAL land polygon's
+            # envelope so a continent cut into plates is kept or dropped as a whole.
+            sql = """
+                SELECT p.fid, p.geom, p.plate_id, p.from_age, p.to_age
+                FROM rtree_land_polygons_geom r
+                JOIN land_polygons p ON p.fid = r.id
+                WHERE r.maxx >= ? AND r.minx <= ?
+                  AND r.maxy >= ? AND r.miny <= ?
+                  AND p.src_env_area >= ?
+                ORDER BY p.src_env_area DESC
+                LIMIT ?
+            """
+            cur = conn.execute(sql, (west, east, south, north, min_area, limit))
+            return [
+                (
+                    int(row[0]),
+                    bytes(row[1]),
+                    {
+                        "plate_id": int(row[2] or 0),
+                        "from_age": float(row[3] if row[3] is not None else 1e6),
+                        "to_age": float(row[4] or 0.0),
+                    },
+                )
+                for row in cur
+            ]
+
         # Prefer larger envelopes when capped so continents stay visible when zoomed out
         sql = """
             SELECT p.fid, p.geom,
@@ -265,7 +302,7 @@ class LandGpkgStore:
             LIMIT ?
         """
         cur = conn.execute(sql, (west, east, south, north, min_area, limit))
-        return [(int(row[0]), bytes(row[1])) for row in cur]
+        return [(int(row[0]), bytes(row[1]), {}) for row in cur]
 
     def stats(self, name: str) -> dict[str, Any]:
         conn = self._conn(name)

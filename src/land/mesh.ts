@@ -68,14 +68,33 @@ export type MeshStats = {
   reasons: string[];
 };
 
+/** Features sharing a plate and lifetime; vertices reference one by index. */
+export type PlateGroup = { plateId: number; fromAge: number; toAge: number };
+
 export type LandMesh = {
   positions: Float32Array;
   normals: Float32Array;
   indices: Uint32Array;
+  /** Per vertex: index into `groups` (plate + lifetime of its feature). */
+  groupIdx: Uint16Array;
+  groups: PlateGroup[];
   featureCount: number;
   triangleCount: number;
   stats: MeshStats;
 };
+
+/** Present-day land without plate tags: never moves, always exists. */
+export const UNTAGGED_GROUP: PlateGroup = { plateId: 0, fromAge: 1e6, toAge: 0 };
+
+function featureGroup(f: GeoJsonFeature): PlateGroup {
+  const p = f.properties;
+  if (!p || typeof p.plate_id !== "number") return UNTAGGED_GROUP;
+  return {
+    plateId: p.plate_id,
+    fromAge: typeof p.from_age === "number" ? p.from_age : 1e6,
+    toAge: typeof p.to_age === "number" ? p.to_age : 0,
+  };
+}
 
 function emptyStats(): MeshStats {
   return {
@@ -1042,7 +1061,12 @@ export function featureCollectionToMesh(
   };
   report();
 
+  const groups: PlateGroup[] = [];
+  const groupByKey = new Map<string, number>();
+  const groupIdx: number[] = [];
+
   for (const f of fc.features) {
+    const vertsBefore = positions.length / 3;
     if (!f.geometry) {
       processed++;
       report();
@@ -1081,6 +1105,18 @@ export function featureCollectionToMesh(
       featureCount++;
       triangleCount += tris;
     }
+    const vertsAfter = positions.length / 3;
+    if (vertsAfter > vertsBefore) {
+      const grp = featureGroup(f);
+      const key = `${grp.plateId}|${grp.fromAge}|${grp.toAge}`;
+      let gi = groupByKey.get(key);
+      if (gi === undefined) {
+        gi = groups.length;
+        groups.push(grp);
+        groupByKey.set(key, gi);
+      }
+      for (let v = vertsBefore; v < vertsAfter; v++) groupIdx.push(gi);
+    }
     processed++;
     report();
   }
@@ -1107,6 +1143,8 @@ export function featureCollectionToMesh(
     positions: new Float32Array(positions),
     normals: new Float32Array(normals),
     indices: new Uint32Array(indices),
+    groupIdx: new Uint16Array(groupIdx),
+    groups,
     featureCount,
     triangleCount,
     stats,

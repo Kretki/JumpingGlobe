@@ -1,6 +1,9 @@
 import { LandLoader, bboxContains, viewBBox, viewHalfAngle, type BBox } from "./land/loader";
 import { WORLD_FILE, lodFileFromHeight } from "./land/lod.config";
 import type { LandMesh } from "./land/mesh";
+import { preparePlateMesh, reconstruct, type PlateMesh, type ReconstructStats } from "./plates/reconstruct";
+import { RotationTree, type RotationModel } from "./plates/rotation";
+import { Timeline } from "./plates/timeline";
 
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
 const coordsEl = document.getElementById("coords") as HTMLDivElement;
@@ -279,6 +282,8 @@ function makeLandSlot(): LandSlot {
 }
 
 const baseSlot = makeLandSlot();
+/** Merdith continental crust (incl. shelves and vanished terranes), drawn under the land. */
+const crustSlot = makeLandSlot();
 const detailSlot = makeLandSlot();
 let detailBBox: BBox | null = null;
 let loadedViewBBox: BBox | null = null;
@@ -291,6 +296,19 @@ function uploadSlot(slot: LandSlot, mesh: LandMesh) {
   gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, slot.idx);
   gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, mesh.indices, gl!.STATIC_DRAW);
   slot.indexCount = mesh.indices.length;
+}
+
+/** Upload a reconstructed plate mesh (indices only change when the mesh does). */
+function uploadPlateSlot(slot: LandSlot, pm: PlateMesh, indicesChanged: boolean) {
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.pos);
+  gl!.bufferData(gl!.ARRAY_BUFFER, pm.positions, gl!.DYNAMIC_DRAW);
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.nrm);
+  gl!.bufferData(gl!.ARRAY_BUFFER, pm.normals, gl!.DYNAMIC_DRAW);
+  if (indicesChanged) {
+    gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, slot.idx);
+    gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, pm.indices, gl!.STATIC_DRAW);
+    slot.indexCount = pm.indices.length;
+  }
 }
 
 function clearSlot(slot: LandSlot) {
@@ -447,6 +465,133 @@ const landLoader = new LandLoader("/api", (p) => {
 });
 
 let landStatus = "loading…";
+
+// ---- Plate reconstruction (Merdith et al. 2021) ----
+let rotationTree: RotationTree | null = null;
+let rotationModelError = false;
+let currentAge = 0;
+let ageDirty = false;
+let basePlates: PlateMesh | null = null;
+let crustPlates: PlateMesh | null = null;
+let showCrust = true;
+/** Server-side plate layers: "building" on first start, then "ready". */
+let plateStatus: { status: string; detail: string } = { status: "loading", detail: "" };
+let lastReconstruct: { base?: ReconstructStats; crust?: ReconstructStats } = {};
+const crustLoader = new LandLoader("/api");
+const plateWorldLoader = new LandLoader("/api");
+
+const timeline = new Timeline(
+  (age) => {
+    currentAge = age;
+    ageDirty = true;
+    if (age > 0 && (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE)) clearDetail();
+  },
+  (visible) => {
+    showCrust = visible;
+  }
+);
+
+type PlateStatusResponse = {
+  status: "ready" | "building" | "failed" | "unavailable";
+  detail: string;
+  plateWorldFile: string | null;
+  continentsFile: string | null;
+};
+
+async function loadRotationModel() {
+  try {
+    const res = await fetch("/api/rotations");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const model = (await res.json()) as RotationModel;
+    rotationTree = new RotationTree(model);
+    timeline.enable(Math.round(model.maxAge));
+    ageDirty = true;
+    void pollPlateLayers();
+  } catch (err) {
+    console.warn("rotation model unavailable", err);
+    rotationModelError = true;
+  }
+  updateTimelineStatus();
+}
+
+/** Wait for the server's plate layers (built once in the background), then load them. */
+async function pollPlateLayers() {
+  while (!landDisposed) {
+    let st: PlateStatusResponse;
+    try {
+      const res = await fetch("/api/plates/status");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      st = (await res.json()) as PlateStatusResponse;
+    } catch (err) {
+      plateStatus = { status: "failed", detail: String(err) };
+      updateTimelineStatus();
+      return;
+    }
+    plateStatus = { status: st.status, detail: st.detail };
+    updateTimelineStatus();
+    if (st.status === "ready") {
+      if (st.plateWorldFile) void loadPlateWorld(st.plateWorldFile);
+      if (st.continentsFile) void loadCrust(st.continentsFile);
+      return;
+    }
+    if (st.status !== "building") return;
+    await new Promise((r) => window.setTimeout(r, 2000));
+  }
+}
+
+/** Swap the base world layer for its plate-tagged twin (same land, cut along plates). */
+async function loadPlateWorld(file: string) {
+  const result = await plateWorldLoader.loadWorld(file);
+  if (landDisposed || !result) return;
+  setBasePlates(result.mesh);
+  if (detailSlot.indexCount === 0) landStatus = resultStatus("world ", result);
+}
+
+function setBasePlates(mesh: LandMesh) {
+  basePlates = preparePlateMesh(mesh);
+  lastReconstruct.base = reconstruct(basePlates, rotationTree, currentAge);
+  uploadPlateSlot(baseSlot, basePlates, true);
+  updateTimelineStatus();
+}
+
+async function loadCrust(file: string) {
+  const result = await crustLoader.loadWorld(file, 0, 100_000);
+  if (landDisposed || !result) return;
+  crustPlates = preparePlateMesh(result.mesh);
+  lastReconstruct.crust = reconstruct(crustPlates, rotationTree, currentAge);
+  uploadPlateSlot(crustSlot, crustPlates, true);
+  updateTimelineStatus();
+}
+
+/** Re-pose the plate-tagged layers for the current age (once per frame at most). */
+function applyAge() {
+  if (!ageDirty) return;
+  ageDirty = false;
+  if (basePlates) {
+    lastReconstruct.base = reconstruct(basePlates, rotationTree, currentAge);
+    uploadPlateSlot(baseSlot, basePlates, false);
+  }
+  if (crustPlates) {
+    lastReconstruct.crust = reconstruct(crustPlates, rotationTree, currentAge);
+    uploadPlateSlot(crustSlot, crustPlates, false);
+  }
+  updateTimelineStatus();
+}
+
+function updateTimelineStatus() {
+  const notes: string[] = [];
+  if (rotationModelError) notes.push("Rotation model unavailable — is the API server running (npm run server)?");
+  else if (plateStatus.status === "building") notes.push("Preparing plate layers (one-time, about a minute)…");
+  else if (plateStatus.status === "failed" || plateStatus.status === "unavailable") {
+    notes.push(`Plate layers unavailable: ${plateStatus.detail || plateStatus.status} (see public/data/lods/merdith_prep.log)`);
+  }
+  const hidden = (lastReconstruct.base?.noRotation ?? 0) + (lastReconstruct.crust?.noRotation ?? 0);
+  if (currentAge > 0 && hidden > 0) notes.push("Some plates have no rotation poles at this age (hidden)");
+  if (currentAge > 0 && lodFileFromHeight(height) !== WORLD_FILE) notes.push("Past ages use the world LOD only");
+  timeline.setStatus(notes.join(" · "));
+}
+
+void loadRotationModel();
 let landLoadTimer = 0;
 let lastLoadLon = NaN;
 let lastLoadLat = NaN;
@@ -482,10 +627,12 @@ async function ensureWorld() {
     setLandProgress(0, "API offline — run npm run server", true);
     return;
   }
-  uploadSlot(baseSlot, result.mesh);
+  // The plate-tagged world may already have arrived; never replace it with the untagged one.
+  const platesFirst = basePlates?.tagged ?? false;
+  if (!platesFirst) setBasePlates(result.mesh);
   baseReady = true;
   lastLoadFile = WORLD_FILE;
-  landStatus = resultStatus("world ", result);
+  landStatus = resultStatus("world ", (platesFirst && plateWorldLoader.getWorld()) || result);
   setLandProgress(100, landStatus, true);
 }
 
@@ -503,7 +650,7 @@ function clearDetail() {
   lastQueuedLat = NaN;
   lastQueuedH = NaN;
   if (baseReady) {
-    const world = landLoader.getWorld();
+    const world = plateWorldLoader.getWorld() ?? landLoader.getWorld();
     landStatus = world ? resultStatus("world ", world) : "world";
   }
 }
@@ -512,6 +659,13 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
   if (landDisposed) return;
   void ensureWorld();
   const file = lodFileFromHeight(h);
+  // Detail LODs are present-day bbox tiles; in the past each plate has moved,
+  // so only the (reconstructed) world layer is shown.
+  if (currentAge > 0) {
+    window.clearTimeout(landLoadTimer);
+    if (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE) clearDetail();
+    return;
+  }
   if (file === WORLD_FILE) {
     window.clearTimeout(landLoadTimer);
     if (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE) clearDetail();
@@ -563,8 +717,11 @@ function disposeLand() {
   landDisposed = true;
   window.clearTimeout(landLoadTimer);
   landLoader.dispose();
+  crustLoader.dispose();
+  plateWorldLoader.dispose();
   destroySlot(detailSlot);
   destroySlot(baseSlot);
+  destroySlot(crustSlot);
   detailBBox = null;
   loadedViewBBox = null;
   baseReady = false;
@@ -577,7 +734,8 @@ function updateCoords(surface: number[], eye: number[]) {
     `<div>lat ${fmt(g.lat, 6)}° · lon ${fmt(g.lon, 6)}°</div>` +
     `<div>ECEF ${fmt(surface[0], 1)}, ${fmt(surface[1], 1)}, ${fmt(surface[2], 1)} m</div>` +
     `<div>camera height ${fmt(height, 1)} m</div>` +
-    `<div>lod ${lodFileFromHeight(height)}</div>` +
+    `<div>lod ${currentAge > 0 ? WORLD_FILE : lodFileFromHeight(height)}</div>` +
+    `<div>age ${currentAge.toFixed(0)} Ma</div>` +
     `<div>land ${landStatus}</div>`;
   scheduleLandLoad(g.lon, g.lat, height);
 }
@@ -617,7 +775,13 @@ function drawMesh(
   gl!.drawElements(gl!.TRIANGLES, indexCount, indexType, 0);
 }
 
+let lastFrameMs = performance.now();
+
 function frame() {
+  const nowMs = performance.now();
+  timeline.tick((nowMs - lastFrameMs) / 1000);
+  lastFrameMs = nowMs;
+  applyAge();
   resize();
   const eye = cameraPos();
   const surface = lookAtSurfacePoint();
@@ -656,6 +820,22 @@ function frame() {
   gl!.enable(gl!.CULL_FACE);
   gl!.frontFace(gl!.CCW);
   gl!.cullFace(gl!.BACK);
+  if (showCrust && crustSlot.indexCount > 0) {
+    // Under the land: no depth writes, so coastlines always draw on top of it.
+    gl!.depthMask(false);
+    drawMesh(
+      crustSlot.pos,
+      crustSlot.nrm,
+      crustSlot.idx,
+      crustSlot.indexCount,
+      gl!.UNSIGNED_INT,
+      [0.5, 0.45, 0.34],
+      mvp,
+      model,
+      eye
+    );
+    gl!.depthMask(true);
+  }
   if (baseSlot.indexCount > 0) {
     const clip =
       detailSlot.indexCount > 0 && detailBBox ? detailBBox : null;

@@ -14,6 +14,7 @@ import {
 import { maxEdgeMFromOrderNum } from "./lod.config";
 import { featureCollectionToMesh, splitLongEdges as splitEdges } from "./mesh";
 import type { GeoJsonFeatureCollection } from "./mesh";
+import { RotationTree, quatFromPole, quatRotate, quatSlerp } from "../plates/rotation";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error("FAIL: " + msg);
@@ -214,6 +215,37 @@ function assert(cond: boolean, msg: string) {
     assert(!covered(mesh, 3.5, 4.5), `${name}: lake crossing the bbox edge stays open`);
     assert(!covered(mesh, 7, 2.5), `${name}: nothing east of the land`);
   }
+}
+
+// Plate rotations: pole rotation, slerp, chained plates, missing poles
+{
+  const v = [0, 0, 0];
+  quatRotate(quatFromPole(90, 0, 90), 1, 0, 0, v); // 90° about the north pole: lon 0 → lon 90
+  assert(Math.abs(v[0]) < 1e-12 && Math.abs(v[1] - 1) < 1e-12 && Math.abs(v[2]) < 1e-12, "pole rotation turns lon 0 to lon 90");
+  quatRotate(quatSlerp(quatFromPole(90, 0, 0), quatFromPole(90, 0, 90), 0.5), 1, 0, 0, v);
+  assert(Math.abs(Math.atan2(v[1], v[0]) * (180 / Math.PI) - 45) < 1e-9, "slerp halfway gives 45°");
+  const tree = new RotationTree({
+    maxAge: 100,
+    anchorPlate: 0,
+    continentsFile: null,
+    plates: {
+      // plate 1 spins 90° about the pole over 100 Myr relative to the anchor
+      "1": [[0, 90, 0, 0, 0], [100, 90, 0, 90, 0]],
+      // plate 2 adds another 90° relative to plate 1, but only back to 50 Ma
+      "2": [[0, 90, 0, 0, 1], [50, 90, 0, 90, 1]],
+    },
+  });
+  const lonAt = (plate: number, age: number) => {
+    const q = tree.total(plate, age);
+    if (!q) return null;
+    quatRotate(q, 1, 0, 0, v);
+    return Math.atan2(v[1], v[0]) * (180 / Math.PI);
+  };
+  assert(Math.abs((lonAt(1, 50) ?? NaN) - 45) < 1e-9, "interpolated pole at 50 Ma");
+  assert(Math.abs((lonAt(2, 50) ?? NaN) - 135) < 1e-9, "chained rotation composes child after parent");
+  assert(lonAt(2, 80) === null, "missing poles in the chain hide the plate instead of snapping it home");
+  assert(lonAt(999999, 10) === null, "unknown plate has no rotation");
+  assert(lonAt(2, 0) === 0, "present day is identity");
 }
 
 console.log("\nAll project/mesh self-checks passed.");
