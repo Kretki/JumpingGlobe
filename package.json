@@ -5,15 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "uv run uvicorn server.app:app --reload --host 127.0.0.1 --port 8765",
+    "server": "uv run uvicorn server.application:app --reload --host 127.0.0.1 --port 8765",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test:land": "tsx src/land/project.test.ts"
+    "test:land": "tsx src/land/landGeometry.test.ts",
+    "lint": "eslint ."
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/earcut": "^3.0.0",
+    "eslint": "10.11.0",
+    "eslint-plugin-security": "4.1.0",
+    "globals": "17.12.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "typescript-eslint": "8.71.0",
+    "vite": "6.4.3"
   },
   "dependencies": {
     "earcut": "^3.2.3"

@@ -29,6 +29,7 @@ lerna-debug.log*
 *.pem
 *.key
 .venv
+.ruff_cache
 
 # Test / coverage
 coverage/

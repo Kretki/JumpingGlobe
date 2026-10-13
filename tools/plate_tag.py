@@ -16,6 +16,7 @@ Only static polygons that exist today (to_age == 0) are used. Land not covered b
 any static polygon (gaps between them) goes to the nearest one. Overlapping static
 polygons never duplicate land: each piece is subtracted once assigned.
 
+The work is split into FID ranges processed in parallel (tools/plate_tagging/).
 Requires GDAL Python bindings (`from osgeo import ogr`), e.g. system python3.
 """
 
@@ -23,224 +24,143 @@ from __future__ import annotations
 
 import argparse
 import math
-import multiprocessing as mp
+import multiprocessing
 import os
 import shutil
 import sys
 import tempfile
 import time
 
-from osgeo import ogr, osr
+from osgeo import ogr
+from plate_tagging.chunk_worker import ChunkTask, tag_chunk
+from plate_tagging.geometry_filters import LAYER_NAME
+from plate_tagging.output_layer import merge_parts
 
-ogr.UseExceptions()
-
-LAYER = "land_polygons"
-CELL_DEG = 5.0
-MIN_PIECE_DEG2 = 1e-12
-
-_static: list[tuple[int, float, float, ogr.Geometry, tuple[float, float, float, float]]] = []
-_grid: dict[tuple[int, int], list[int]] = {}
+CHUNKS_PER_JOB = 8
 
 
-def _polygonal(g: ogr.Geometry | None) -> ogr.Geometry | None:
-    """Polygon/MultiPolygon part of a geometry (drops lines/points from collections)."""
-    if g is None or g.IsEmpty():
-        return None
-    t = ogr.GT_Flatten(g.GetGeometryType())
-    if t == ogr.wkbPolygon:
-        return ogr.ForceToMultiPolygon(g)
-    if t == ogr.wkbMultiPolygon:
-        return g
-    if t == ogr.wkbGeometryCollection:
-        out = ogr.Geometry(ogr.wkbMultiPolygon)
-        for i in range(g.GetGeometryCount()):
-            sub = _polygonal(g.GetGeometryRef(i))
-            if sub is not None:
-                for j in range(sub.GetGeometryCount()):
-                    out.AddGeometry(sub.GetGeometryRef(j))
-        return out if out.GetGeometryCount() else None
-    return None
+def parse_arguments(argument_list: list[str] | None = None) -> argparse.Namespace:
+    """Parse the command line.
+
+    Usage:
+        ``parse_arguments()`` reads sys.argv.
+
+    Args:
+        argument_list: Arguments without the program name, or None for sys.argv.
+
+    Returns:
+        Namespace with land, static, output and jobs.
+    """
+    arg_parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    arg_parser.add_argument("land")
+    arg_parser.add_argument("static")
+    arg_parser.add_argument("output", metavar="out")
+    arg_parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    return arg_parser.parse_args(argument_list)
 
 
-def _cells(env: tuple[float, float, float, float]):
-    x0, x1, y0, y1 = env
-    for cx in range(math.floor(x0 / CELL_DEG), math.floor(x1 / CELL_DEG) + 1):
-        for cy in range(math.floor(y0 / CELL_DEG), math.floor(y1 / CELL_DEG) + 1):
-            yield cx, cy
+def read_feature_ids(land_path: str) -> list[int]:
+    """List the FIDs of the land layer in iteration order.
+
+    Usage:
+        Basis for splitting the work into chunks.
+
+    Args:
+        land_path: Land GeoPackage.
+
+    Returns:
+        FIDs of every feature in ``land_polygons``.
+    """
+    land_source = ogr.Open(land_path)
+    feature_ids = [land_feature.GetFID() for land_feature in land_source.GetLayer(LAYER_NAME)]
+    land_source = None
+    return feature_ids
 
 
-def _load_static(path: str) -> None:
-    ds = ogr.Open(path)
-    layer = ds.GetLayer(0)
-    for f in layer:
-        if float(f.GetField("to_age") or 0) > 0:
-            continue  # not present today: cannot own present-day land
-        g = _polygonal(f.GetGeometryRef().Clone())
-        if g is None:
-            continue
-        env = g.GetEnvelope()
-        idx = len(_static)
-        _static.append((int(f.GetField("plate_id")), float(f.GetField("from_age")), 0.0, g, env))
-        for c in _cells(env):
-            _grid.setdefault(c, []).append(idx)
+def chunk_bounds(feature_ids: list[int], job_count: int) -> list[tuple[int, int]]:
+    """Split FIDs into contiguous half-open ranges.
+
+    Usage:
+        About CHUNKS_PER_JOB chunks per worker keeps the pool balanced.
+
+    Args:
+        feature_ids: Non-empty FIDs in iteration order.
+        job_count: Number of worker processes.
+
+    Returns:
+        List of (lower_fid, upper_fid) with lower inclusive and upper exclusive.
+    """
+    chunk_count = max(job_count * CHUNKS_PER_JOB, 1)
+    step_size = max(1, math.ceil(len(feature_ids) / chunk_count))
+    return [
+        (feature_ids[start_idx], feature_ids[min(start_idx + step_size, len(feature_ids)) - 1] + 1)
+        for start_idx in range(0, len(feature_ids), step_size)
+    ]
 
 
-def _candidates(env: tuple[float, float, float, float]) -> list[int]:
-    seen: set[int] = set()
-    x0, x1, y0, y1 = env
-    for c in _cells(env):
-        for i in _grid.get(c, ()):
-            if i in seen:
-                continue
-            e = _static[i][4]
-            if e[0] <= x1 and e[1] >= x0 and e[2] <= y1 and e[3] >= y0:
-                seen.add(i)
-    # Big/old polygons first so overlaps resolve to the long-lived owner.
-    return sorted(seen, key=lambda i: -_static[i][1])
+def run_chunks(task_list: list[ChunkTask], job_count: int) -> None:
+    """Process all chunks in a worker pool, printing progress on one line.
+
+    Usage:
+        Called by main between chunking and merging.
+
+    Args:
+        task_list: Chunks to process.
+        job_count: Number of worker processes.
+
+    Returns:
+        None.
+    """
+    start_time = time.time()
+    chunks_done = features_read = pieces_written = 0
+    with multiprocessing.Pool(job_count) as worker_pool:
+        for chunk_read, chunk_written in worker_pool.imap_unordered(tag_chunk, task_list):
+            chunks_done += 1
+            features_read += chunk_read
+            pieces_written += chunk_written
+            print(
+                f"\r  {chunks_done}/{len(task_list)} chunks · {features_read} land → {pieces_written} plate pieces"
+                f" · {time.time() - start_time:.0f}s",
+                end="",
+                flush=True,
+            )
+    print()
 
 
-def _nearest(g: ogr.Geometry) -> int:
-    env = g.GetEnvelope()
-    pad = CELL_DEG
-    while pad <= 360:
-        cand = _candidates((env[0] - pad, env[1] + pad, env[2] - pad, env[3] + pad))
-        if cand:
-            return min(cand, key=lambda i: g.Distance(_static[i][3]))
-        pad *= 2
-    return 0
+def cli_main(argument_list: list[str] | None = None) -> None:
+    """Command-line entry point.
 
+    Usage:
+        ``plate_tag.py land.gpkg static.gpkg out.gpkg --jobs 8``.
 
-def _assign(land: ogr.Geometry) -> list[tuple[int, ogr.Geometry]]:
-    """[(static index, piece)] covering `land` exactly once."""
-    env = land.GetEnvelope()
-    cand = _candidates(env)
-    for i in cand:
-        e = _static[i][4]
-        if e[0] <= env[0] and e[1] >= env[1] and e[2] <= env[2] and e[3] >= env[3]:
-            if _static[i][3].Contains(land):
-                return [(i, land)]
-    out: list[tuple[int, ogr.Geometry]] = []
-    remaining: ogr.Geometry | None = land
-    for i in cand:
-        if remaining is None:
-            break
-        sg = _static[i][3]
-        if not sg.Intersects(remaining):
-            continue
-        piece = _polygonal(remaining.Intersection(sg))
-        if piece is None or piece.GetArea() <= MIN_PIECE_DEG2:
-            continue
-        out.append((i, piece))
-        remaining = _polygonal(remaining.Difference(sg))
-        if remaining is not None and remaining.GetArea() <= MIN_PIECE_DEG2:
-            remaining = None
-    if remaining is not None:
-        out.append((_nearest(remaining) if _static else 0, remaining))
-    return out
+    Args:
+        argument_list: Arguments without the program name, or None for sys.argv.
 
-
-def _worker(args: tuple[str, str, int, int, str]) -> tuple[int, int]:
-    land_path, static_path, fid_lo, fid_hi, out_path = args
-    if not _static:
-        _load_static(static_path)
-    src = ogr.Open(land_path)
-    layer = src.GetLayer(LAYER)
-    layer.SetAttributeFilter(f"fid >= {fid_lo} AND fid < {fid_hi}")
-
-    drv = ogr.GetDriverByName("GPKG")
-    dst = drv.CreateDataSource(out_path)
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(4326)
-    out = dst.CreateLayer(LAYER, srs, ogr.wkbMultiPolygon, options=["SPATIAL_INDEX=NO"])
-    out.CreateField(ogr.FieldDefn("plate_id", ogr.OFTInteger))
-    out.CreateField(ogr.FieldDefn("from_age", ogr.OFTReal))
-    out.CreateField(ogr.FieldDefn("to_age", ogr.OFTReal))
-    out.CreateField(ogr.FieldDefn("src_env_area", ogr.OFTReal))
-    defn = out.GetLayerDefn()
-
-    # Re-tagging an already tagged file keeps the original polygon's envelope area.
-    has_src_area = layer.GetLayerDefn().GetFieldIndex("src_env_area") >= 0
-
-    n_in = n_out = 0
-    dst.StartTransaction()
-    for f in layer:
-        g = _polygonal(f.GetGeometryRef())
-        if g is None:
-            continue
-        n_in += 1
-        if has_src_area and f.GetField("src_env_area") is not None:
-            env_area = float(f.GetField("src_env_area"))
-        else:
-            e = g.GetEnvelope()
-            env_area = (e[1] - e[0]) * (e[3] - e[2])
-        for i, piece in _assign(g):
-            plate_id, from_age, to_age = (_static[i][0], _static[i][1], _static[i][2]) if _static else (0, 1e6, 0.0)
-            of = ogr.Feature(defn)
-            of.SetGeometry(ogr.ForceToMultiPolygon(piece))
-            of.SetField("plate_id", plate_id)
-            of.SetField("from_age", from_age)
-            of.SetField("to_age", to_age)
-            of.SetField("src_env_area", env_area)
-            out.CreateFeature(of)
-            n_out += 1
-    dst.CommitTransaction()
-    dst = None
-    return n_in, n_out
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("land")
-    ap.add_argument("static")
-    ap.add_argument("out")
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
-    a = ap.parse_args()
-
-    src = ogr.Open(a.land)
-    layer = src.GetLayer(LAYER)
-    fids = [f.GetFID() for f in layer]
-    src = None
-    if not fids:
-        sys.exit(f"{a.land}: no features in {LAYER}")
-    chunks = max(a.jobs * 8, 1)
-    step = max(1, math.ceil(len(fids) / chunks))
-    bounds = [(fids[i], fids[min(i + step, len(fids)) - 1] + 1) for i in range(0, len(fids), step)]
-
-    tmp = tempfile.mkdtemp(prefix="plate_tag_", dir=os.path.dirname(os.path.abspath(a.out)))
+    Returns:
+        None; exits with a message when the land layer is empty.
+    """
+    arguments = parse_arguments(argument_list)
+    feature_ids = read_feature_ids(arguments.land)
+    if not feature_ids:
+        sys.exit(f"{arguments.land}: no features in {LAYER_NAME}")
+    output_dir = os.path.dirname(os.path.abspath(arguments.output))
+    scratch_dir = tempfile.mkdtemp(prefix="plate_tag_", dir=output_dir)
     try:
-        tasks = [(a.land, a.static, lo, hi, os.path.join(tmp, f"part{k:04d}.gpkg")) for k, (lo, hi) in enumerate(bounds)]
-        t0 = time.time()
-        done = n_in = n_out = 0
-        with mp.Pool(a.jobs) as pool:
-            for i_n, o_n in pool.imap_unordered(_worker, tasks):
-                done += 1
-                n_in += i_n
-                n_out += o_n
-                print(f"\r  {done}/{len(tasks)} chunks · {n_in} land → {n_out} plate pieces · {time.time() - t0:.0f}s", end="", flush=True)
-        print()
-
-        drv = ogr.GetDriverByName("GPKG")
-        if os.path.exists(a.out):
-            drv.DeleteDataSource(a.out)
-        dst = drv.CreateDataSource(a.out)
-        srs = osr.SpatialReference()
-        srs.ImportFromEPSG(4326)
-        out = dst.CreateLayer(LAYER, srs, ogr.wkbMultiPolygon, options=["SPATIAL_INDEX=YES"])
-        for name, t in (("plate_id", ogr.OFTInteger), ("from_age", ogr.OFTReal), ("to_age", ogr.OFTReal), ("src_env_area", ogr.OFTReal)):
-            out.CreateField(ogr.FieldDefn(name, t))
-        dst.StartTransaction()
-        for _, _, _, _, part in tasks:
-            pds = ogr.Open(part)
-            for f in pds.GetLayer(0):
-                f.SetFID(-1)
-                out.CreateFeature(f)
-            pds = None
-        dst.CommitTransaction()
-        dst.ExecuteSQL(f"CREATE INDEX IF NOT EXISTS idx_{LAYER}_src_env_area ON {LAYER}(src_env_area)")
-        dst = None
+        task_list = [
+            ChunkTask(
+                arguments.land,
+                arguments.static,
+                lower_fid,
+                upper_fid,
+                os.path.join(scratch_dir, f"part{chunk_idx:04d}.gpkg"),
+            )
+            for chunk_idx, (lower_fid, upper_fid) in enumerate(chunk_bounds(feature_ids, arguments.jobs))
+        ]
+        run_chunks(task_list, arguments.jobs)
+        merge_parts([chunk_task.output_path for chunk_task in task_list], arguments.output)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    main()
+    cli_main()

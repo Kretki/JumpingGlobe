@@ -9,6 +9,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tools = [
+    "defusedxml>=0.7.1",
     "gdal>=3.13.0",
 ]
 
@@ -19,3 +20,14 @@ dev = [
     "ruff>=0.17.0",
     "semgrep==1.180.0",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = [".", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "S"]
+
+[tool.bandit]
+exclude_dirs = [".venv", "node_modules", "dist"]

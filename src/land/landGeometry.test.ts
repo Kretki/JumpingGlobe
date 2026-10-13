@@ -1,230 +1,228 @@
 /**
- * Lightweight self-check for land projection primitives.
- * Run: npx --yes tsx src/land/project.test.ts
+ * Lightweight self-check for land projection, meshing and plate rotation primitives.
+ * Run: npm run test:land
  */
 
-import {
-  ecefToLonLat,
-  geodesicPoint,
-  lonLatToEcef,
-  ringEnclosesPole,
-  unwrapRingLons,
-  unwrappedLonSpan,
-} from "./project";
+import { ecefToLonLat, lonLatToEcef } from "../geodesy/wgs84Ellipsoid";
+import { RotationTree } from "../plates/rotationTree";
+import { quatFromPole, quatRotate, quatSlerp } from "../plates/quaternionMath";
+import { unwrapRingLons, unwrappedLonSpan } from "./antimeridianSplit";
+import { splitLongEdges } from "./edgeRefinement";
+import { geodesicPoint } from "./geodesicDensify";
 import { maxEdgeMFromOrderNum } from "./lod.config";
-import { featureCollectionToMesh, splitLongEdges as splitEdges } from "./mesh";
-import type { GeoJsonFeatureCollection } from "./mesh";
-import { RotationTree, quatFromPole, quatRotate, quatSlerp } from "../plates/rotation";
+import { featureCollectionToMesh } from "./meshBuilder";
+import type { GeoJsonFeatureCollection, LandMesh } from "./meshTypes";
+import { ringEnclosesPole } from "./poleDetection";
 
-function assert(cond: boolean, msg: string) {
-  if (!cond) throw new Error("FAIL: " + msg);
-  console.log("ok:", msg);
+/**
+ * Throw when a condition fails, log it otherwise.
+ *
+ * Usage: every check below.
+ *
+ * @param condition - Checked condition.
+ * @param checkName - Description printed with the result.
+ * @returns Nothing.
+ * @throws Error when the condition is false.
+ */
+function assertCheck(condition: boolean, checkName: string): void {
+  if (!condition) throw new Error("FAIL: " + checkName);
+  console.log("ok:", checkName);
+}
+
+/**
+ * Wrap one polygon in a FeatureCollection.
+ *
+ * Usage: test fixtures.
+ *
+ * @param polygonRings - GeoJSON rings.
+ * @returns FeatureCollection with one Polygon feature.
+ */
+function singlePolygon(polygonRings: number[][][]): GeoJsonFeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: polygonRings } }],
+  };
+}
+
+/**
+ * Whether any triangle of a mesh covers a lon/lat point (planar test in lon/lat).
+ *
+ * Usage: clipping checks.
+ *
+ * @param landMesh - Mesh to test.
+ * @param longitudeDeg - Point longitude.
+ * @param latitudeDeg - Point latitude.
+ * @returns True when covered.
+ */
+function isCovered(landMesh: LandMesh, longitudeDeg: number, latitudeDeg: number): boolean {
+  const positionData = landMesh.positions;
+  const vertexLonLat = (vertexIdx: number) =>
+    ecefToLonLat(positionData[vertexIdx * 3], positionData[vertexIdx * 3 + 1], positionData[vertexIdx * 3 + 2]);
+  const sideOfEdge = (startPoint: number[], endPoint: number[]) =>
+    (endPoint[0] - startPoint[0]) * (latitudeDeg - startPoint[1]) - (endPoint[1] - startPoint[1]) * (longitudeDeg - startPoint[0]);
+  const triangleIndices = landMesh.triangleIndices;
+  for (let triangleStart = 0; triangleStart < triangleIndices.length; triangleStart += 3) {
+    const triangleCornerA = vertexLonLat(triangleIndices[triangleStart]);
+    const triangleCornerB = vertexLonLat(triangleIndices[triangleStart + 1]);
+    const triangleCornerC = vertexLonLat(triangleIndices[triangleStart + 2]);
+    const triangleSideAB = sideOfEdge(triangleCornerA, triangleCornerB);
+    const triangleSideBC = sideOfEdge(triangleCornerB, triangleCornerC);
+    const triangleSideCA = sideOfEdge(triangleCornerC, triangleCornerA);
+    if ((triangleSideAB >= 0 && triangleSideBC >= 0 && triangleSideCA >= 0) || (triangleSideAB <= 0 && triangleSideBC <= 0 && triangleSideCA <= 0)) return true;
+  }
+  return false;
 }
 
 // Dateline unwrap
 {
-  const ring: [number, number][] = [
+  const datelineRing: [number, number][] = [
     [170, 10],
     [175, 10],
     [-175, 10],
     [-170, 10],
     [170, 10],
   ];
-  const u = unwrapRingLons(ring);
-  assert(u[2][0] > 180 || u[2][0] > u[1][0], "unwrapped lons monotonic across dateline");
-  assert(unwrappedLonSpan(u) < 50, "unwrapped span of short dateline arc is small");
+  const unwrappedRing = unwrapRingLons(datelineRing);
+  assertCheck(unwrappedRing[2][0] > 180 || unwrappedRing[2][0] > unwrappedRing[1][0], "unwrapped lons monotonic across dateline");
+  assertCheck(unwrappedLonSpan(unwrappedRing) < 50, "unwrapped span of short dateline arc is small");
 }
 
 // Geodesic midpoint
 {
-  const a = lonLatToEcef(0, 0, 12);
-  const b = lonLatToEcef(0, 2, 12);
-  const m = geodesicPoint(a, b, 0.5, 12);
-  const [lon, lat] = ecefToLonLat(m[0], m[1], m[2]);
-  assert(Math.abs(lon) < 0.5, "midpoint lon near 0");
-  assert(Math.abs(lat - 1) < 0.15, "midpoint lat ≈ 1°");
+  const startEcef = lonLatToEcef(0, 0, 12);
+  const endPointEcef = lonLatToEcef(0, 2, 12);
+  const midPointEcef = geodesicPoint(startEcef, endPointEcef, 0.5, 12);
+  const [midLongitude, midLatitude] = ecefToLonLat(midPointEcef[0], midPointEcef[1], midPointEcef[2]);
+  assertCheck(Math.abs(midLongitude) < 0.5, "midpoint lon near 0");
+  assertCheck(Math.abs(midLatitude - 1) < 0.15, "midpoint lat ≈ 1°");
 }
 
 // Pole enclosure
 {
-  const ant: [number, number][] = [];
-  for (let i = 0; i <= 36; i++) {
-    const lon = -180 + (i / 36) * 360;
-    ant.push([lon, -80]);
-  }
-  const pole = ringEnclosesPole(ant);
-  assert(pole === "south", "Antarctica-like ring encloses south pole");
+  const antarcticRing: [number, number][] = [];
+  for (let stepIndex = 0; stepIndex <= 36; stepIndex++) antarcticRing.push([-180 + (stepIndex / 36) * 360, -80]);
+  assertCheck(ringEnclosesPole(antarcticRing) === "south", "Antarctica-like ring encloses south pole");
 }
 
 // Edge split
 {
-  const positions: number[] = [];
-  const indices: number[] = [];
-  const p0 = lonLatToEcef(0, 0, 12);
-  const p1 = lonLatToEcef(5, 0, 12);
-  const p2 = lonLatToEcef(0, 5, 12);
-  positions.push(...p0, ...p1, ...p2);
-  indices.push(0, 1, 2);
-  const { maxEdge } = splitEdges(positions, indices, maxEdgeMFromOrderNum(0), 12);
-  assert(maxEdge <= maxEdgeMFromOrderNum(0) * 1.05, `maxEdge ${maxEdge} ≤ budget`);
-  assert(indices.length / 3 > 1, "edge split produced more triangles");
+  const positionData: number[] = [];
+  const indexList: number[] = [];
+  positionData.push(...lonLatToEcef(0, 0, 12), ...lonLatToEcef(5, 0, 12), ...lonLatToEcef(0, 5, 12));
+  indexList.push(0, 1, 2);
+  const { maxEdgeLength } = splitLongEdges(positionData, indexList, maxEdgeMFromOrderNum(0), 12);
+  assertCheck(maxEdgeLength <= maxEdgeMFromOrderNum(0) * 1.05, `maxEdgeLength ${maxEdgeLength} ≤ budget`);
+  assertCheck(indexList.length / 3 > 1, "edge split produced more triangles");
 }
 
 // Simple continent-like Africa box
 {
-  const fc: GeoJsonFeatureCollection = {
-    type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        geometry: {
-          type: "Polygon",
-          coordinates: [
-            [
-              [0, 0],
-              [20, 0],
-              [20, 15],
-              [0, 15],
-              [0, 0],
-            ],
-          ],
-        },
-      },
+  const africaBox = singlePolygon([
+    [
+      [0, 0],
+      [20, 0],
+      [20, 15],
+      [0, 15],
+      [0, 0],
     ],
-  };
-  const mesh = featureCollectionToMesh(fc, 0);
-  assert(mesh.triangleCount > 0, "simple polygon produces triangles");
-  assert(mesh.stats.earcutEmpty + mesh.stats.earcutThrow === 0, "no earcut failures on simple poly");
-  assert(
-    mesh.stats.maxEdgeMObserved <= maxEdgeMFromOrderNum(0) * 1.05,
-    `maxEdge observed ${mesh.stats.maxEdgeMObserved}`
+  ]);
+  const fullMesh = featureCollectionToMesh(africaBox, 0);
+  assertCheck(fullMesh.triangleCount > 0, "simple polygon produces triangles");
+  assertCheck(fullMesh.meshStats.earcutEmpty + fullMesh.meshStats.earcutThrow === 0, "no earcut failures on simple poly");
+  assertCheck(
+    fullMesh.meshStats.maxEdgeMObserved <= maxEdgeMFromOrderNum(0) * 1.05,
+    `maxEdgeLength observed ${fullMesh.meshStats.maxEdgeMObserved}`
   );
-
-  const clipped = featureCollectionToMesh(fc, 0, undefined, {
-    bbox: { west: 5, south: 5, east: 10, north: 10 },
-    heightM: 3_000_000,
+  const clippedMesh = featureCollectionToMesh(africaBox, 0, undefined, {
+    clipBounds: { westEdge: 5, southEdge: 5, eastEdge: 10, northEdge: 10 },
+    cameraHeightM: 3_000_000,
   });
-  assert(clipped.triangleCount > 0, "clip to view bbox still produces triangles");
-  assert(
-    clipped.triangleCount <= mesh.triangleCount,
-    "clipped mesh is not larger than full polygon"
-  );
+  assertCheck(clippedMesh.triangleCount > 0, "clip to view bbox still produces triangles");
+  assertCheck(clippedMesh.triangleCount <= fullMesh.triangleCount, "clippedPolygon mesh is not larger than full polygon");
 }
 
 // Asia-like dateline spanning polygon (proper ring across ±180)
 {
-  const fc: GeoJsonFeatureCollection = {
-    type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        geometry: {
-          type: "Polygon",
-          coordinates: [
-            [
-              [170, 40],
-              [175, 40],
-              [-175, 40],
-              [-170, 40],
-              [-170, 50],
-              [-175, 50],
-              [175, 50],
-              [170, 50],
-              [170, 40],
-            ],
-          ],
-        },
-      },
-    ],
-  };
-  const mesh = featureCollectionToMesh(fc, 0);
-  assert(
-    mesh.triangleCount > 0 && mesh.triangleCount < 500_000,
-    `dateline polygon triangles=${mesh.triangleCount} splits=${mesh.stats.datelineSplits}`
+  const datelineMesh = featureCollectionToMesh(
+    singlePolygon([
+      [
+        [170, 40],
+        [175, 40],
+        [-175, 40],
+        [-170, 40],
+        [-170, 50],
+        [-175, 50],
+        [175, 50],
+        [170, 50],
+        [170, 40],
+      ],
+    ]),
+    0
   );
-  assert(
-    mesh.stats.earcutEmpty + mesh.stats.earcutThrow === 0,
-    "no earcut failures on dateline poly"
+  assertCheck(
+    datelineMesh.triangleCount > 0 && datelineMesh.triangleCount < 500_000,
+    `dateline polygon triangles=${datelineMesh.triangleCount} splits=${datelineMesh.meshStats.datelineSplits}`
   );
+  assertCheck(datelineMesh.meshStats.earcutEmpty + datelineMesh.meshStats.earcutThrow === 0, "no earcut failures on dateline poly");
 }
 
 // Antarctica-like
 {
-  const ring: number[][] = [];
-  for (let i = 0; i <= 24; i++) {
-    ring.push([-180 + (i / 24) * 360, -72]);
+  const antarcticRing: number[][] = [];
+  for (let stepIndex = 0; stepIndex <= 24; stepIndex++) antarcticRing.push([-180 + (stepIndex / 24) * 360, -72]);
+  antarcticRing.push(antarcticRing[0]);
+  const antarcticMesh = featureCollectionToMesh(singlePolygon([antarcticRing]), 0);
+  assertCheck(antarcticMesh.meshStats.poleHandled >= 1, "poleHandled for Antarctica-like");
+  assertCheck(antarcticMesh.triangleCount > 0, "Antarctica-like has triangles");
+  // No triangle centroid should be near the equator.
+  let northernCount = 0;
+  const positionData = antarcticMesh.positions;
+  const triangleIndices = antarcticMesh.triangleIndices;
+  for (let triangleStart = 0; triangleStart < triangleIndices.length; triangleStart += 3) {
+    const centroidZ =
+      (positionData[triangleIndices[triangleStart] * 3 + 2] +
+        positionData[triangleIndices[triangleStart + 1] * 3 + 2] +
+        positionData[triangleIndices[triangleStart + 2] * 3 + 2]) /
+      3;
+    if (centroidZ > -1e6) northernCount++;
   }
-  ring.push(ring[0]);
-  const fc: GeoJsonFeatureCollection = {
-    type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        geometry: { type: "Polygon", coordinates: [ring] },
-      },
-    ],
-  };
-  const mesh = featureCollectionToMesh(fc, 0);
-  assert(mesh.stats.poleHandled >= 1, "poleHandled for Antarctica-like");
-  assert(mesh.triangleCount > 0, "Antarctica-like has triangles");
-  // No triangle centroid should be near equator
-  let bad = 0;
-  const pos = mesh.positions;
-  const idx = mesh.indices;
-  for (let t = 0; t < idx.length; t += 3) {
-    const i0 = idx[t];
-    const i1 = idx[t + 1];
-    const i2 = idx[t + 2];
-    const z = (pos[i0 * 3 + 2] + pos[i1 * 3 + 2] + pos[i2 * 3 + 2]) / 3;
-    if (z > -1e6) bad++;
-  }
-  assert(bad === 0, "no Antarctica triangles near/north of equator");
+  assertCheck(northernCount === 0, "no Antarctica triangles near/north of equator");
 }
 
 // Clipping must not bridge separate pieces: a comb whose teeth are joined outside
 // the view bbox (plus a lake crossing the bbox edge) must leave the gaps uncovered.
 {
-  const comb = [
+  const combRing = [
     [0, 0], [6, 0], [6, 1], [1, 1], [1, 2], [6, 2], [6, 3], [1, 3], [1, 4], [6, 4], [6, 5], [0, 5], [0, 0],
   ];
-  const lake = [[2.5, 4.2], [4, 4.2], [4, 4.8], [2.5, 4.8], [2.5, 4.2]];
-  const bbox = { west: 3, south: -1, east: 8, north: 6 };
-  const covered = (mesh: ReturnType<typeof featureCollectionToMesh>, lon: number, lat: number) => {
-    const p = mesh.positions;
-    const ll = (i: number) => ecefToLonLat(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
-    const cross = (a: number[], b: number[]) => (b[0] - a[0]) * (lat - a[1]) - (b[1] - a[1]) * (lon - a[0]);
-    for (let t = 0; t < mesh.indices.length; t += 3) {
-      const a = ll(mesh.indices[t]);
-      const b = ll(mesh.indices[t + 1]);
-      const c = ll(mesh.indices[t + 2]);
-      const d1 = cross(a, b);
-      const d2 = cross(b, c);
-      const d3 = cross(c, a);
-      if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) return true;
-    }
-    return false;
-  };
-  for (const [name, ext] of [["ccw", comb], ["cw", [...comb].reverse()]] as const) {
-    const fc: GeoJsonFeatureCollection = {
-      type: "FeatureCollection",
-      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [ext as number[][], lake] } }],
-    };
-    const mesh = featureCollectionToMesh(fc, 5, undefined, { bbox, heightM: 50_000 });
-    assert(covered(mesh, 4.5, 0.5) && covered(mesh, 4.5, 2.5) && covered(mesh, 4.5, 4.1), `${name}: comb teeth are land`);
-    assert(!covered(mesh, 4.5, 1.5) && !covered(mesh, 4.5, 3.5), `${name}: water between clipped teeth stays open`);
-    assert(!covered(mesh, 3.5, 4.5), `${name}: lake crossing the bbox edge stays open`);
-    assert(!covered(mesh, 7, 2.5), `${name}: nothing east of the land`);
+  const lakeRing = [[2.5, 4.2], [4, 4.2], [4, 4.8], [2.5, 4.8], [2.5, 4.2]];
+  const clipBounds = { westEdge: 3, southEdge: -1, eastEdge: 8, northEdge: 6 };
+  for (const [windingName, exteriorRing] of [["ccw", combRing], ["cw", [...combRing].reverse()]] as const) {
+    const combMesh = featureCollectionToMesh(singlePolygon([exteriorRing as number[][], lakeRing]), 5, undefined, {
+      clipBounds,
+      cameraHeightM: 50_000,
+    });
+    assertCheck(
+      isCovered(combMesh, 4.5, 0.5) && isCovered(combMesh, 4.5, 2.5) && isCovered(combMesh, 4.5, 4.1),
+      `${windingName}: comb teeth are land`
+    );
+    assertCheck(!isCovered(combMesh, 4.5, 1.5) && !isCovered(combMesh, 4.5, 3.5), `${windingName}: water between clippedPolygon teeth stays open`);
+    assertCheck(!isCovered(combMesh, 3.5, 4.5), `${windingName}: lake crossing the bbox edge stays open`);
+    assertCheck(!isCovered(combMesh, 7, 2.5), `${windingName}: nothing east of the land`);
   }
 }
 
 // Plate rotations: pole rotation, slerp, chained plates, missing poles
 {
-  const v = [0, 0, 0];
-  quatRotate(quatFromPole(90, 0, 90), 1, 0, 0, v); // 90° about the north pole: lon 0 → lon 90
-  assert(Math.abs(v[0]) < 1e-12 && Math.abs(v[1] - 1) < 1e-12 && Math.abs(v[2]) < 1e-12, "pole rotation turns lon 0 to lon 90");
-  quatRotate(quatSlerp(quatFromPole(90, 0, 0), quatFromPole(90, 0, 90), 0.5), 1, 0, 0, v);
-  assert(Math.abs(Math.atan2(v[1], v[0]) * (180 / Math.PI) - 45) < 1e-9, "slerp halfway gives 45°");
-  const tree = new RotationTree({
+  const rotatedVec = [0, 0, 0];
+  quatRotate(quatFromPole(90, 0, 90), 1, 0, 0, rotatedVec); // 90° about the north pole: lon 0 → lon 90
+  assertCheck(
+    Math.abs(rotatedVec[0]) < 1e-12 && Math.abs(rotatedVec[1] - 1) < 1e-12 && Math.abs(rotatedVec[2]) < 1e-12,
+    "pole rotation turns lon 0 to lon 90"
+  );
+  quatRotate(quatSlerp(quatFromPole(90, 0, 0), quatFromPole(90, 0, 90), 0.5), 1, 0, 0, rotatedVec);
+  assertCheck(Math.abs(Math.atan2(rotatedVec[1], rotatedVec[0]) * (180 / Math.PI) - 45) < 1e-9, "slerp halfway gives 45°");
+  const rotationTree = new RotationTree({
     maxAge: 100,
     anchorPlate: 0,
     plates: {
@@ -234,17 +232,17 @@ function assert(cond: boolean, msg: string) {
       "2": [[0, 90, 0, 0, 1], [50, 90, 0, 90, 1]],
     },
   });
-  const lonAt = (plate: number, age: number) => {
-    const q = tree.total(plate, age);
-    if (!q) return null;
-    quatRotate(q, 1, 0, 0, v);
-    return Math.atan2(v[1], v[0]) * (180 / Math.PI);
+  const longitudeAt = (plateNumber: number, ageInMyr: number) => {
+    const plateQuat = rotationTree.totalRotation(plateNumber, ageInMyr);
+    if (!plateQuat) return null;
+    quatRotate(plateQuat, 1, 0, 0, rotatedVec);
+    return Math.atan2(rotatedVec[1], rotatedVec[0]) * (180 / Math.PI);
   };
-  assert(Math.abs((lonAt(1, 50) ?? NaN) - 45) < 1e-9, "interpolated pole at 50 Ma");
-  assert(Math.abs((lonAt(2, 50) ?? NaN) - 135) < 1e-9, "chained rotation composes child after parent");
-  assert(lonAt(2, 80) === null, "missing poles in the chain hide the plate instead of snapping it home");
-  assert(lonAt(999999, 10) === null, "unknown plate has no rotation");
-  assert(lonAt(2, 0) === 0, "present day is identity");
+  assertCheck(Math.abs((longitudeAt(1, 50) ?? NaN) - 45) < 1e-9, "interpolated pole at 50 Ma");
+  assertCheck(Math.abs((longitudeAt(2, 50) ?? NaN) - 135) < 1e-9, "chained rotation composes child after parent");
+  assertCheck(longitudeAt(2, 80) === null, "missing poles in the chain hide the plate instead of snapping it home");
+  assertCheck(longitudeAt(999999, 10) === null, "unknown plate has no rotation");
+  assertCheck(longitudeAt(2, 0) === 0, "present day is identity");
 }
 
-console.log("\nAll project/mesh self-checks passed.");
+console.log("\nAll land geometry / mesh / rotation self-checks passed.");

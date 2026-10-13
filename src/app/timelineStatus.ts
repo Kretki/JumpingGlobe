@@ -1,0 +1,48 @@
+/** Status line under the timeline: why plates or detail are not shown. */
+
+import { lodFileFromHeight, WORLD_FILE } from "../land/lod.config";
+
+export type TimelineStatusInput = {
+  rotationModelError: boolean;
+  buildStatus: string;
+  statusDetail: string;
+  plateFiles: Record<string, string>;
+  hiddenPlateGroups: number;
+  ageInMyr: number;
+  cameraHeightM: number;
+  isPlaying: boolean;
+};
+
+/**
+ * Compose the timeline status text.
+ *
+ * Usage: whenever age, plate status or zoom changes.
+ *
+ * @param statusInput - Current state.
+ * @returns Notes joined by " · " ("" when everything is fine).
+ */
+export function timelineStatusText(statusInput: TimelineStatusInput): string {
+  const statusNotes: string[] = [];
+  if (statusInput.rotationModelError) {
+    statusNotes.push("Rotation model unavailable — is the API server running (npm run server)?");
+  } else if (statusInput.buildStatus === "failed" || statusInput.buildStatus === "unavailable") {
+    statusNotes.push(
+      `Plate layers unavailable: ${statusInput.statusDetail || statusInput.buildStatus} (see public/data/lods/merdith_prep.log)`
+    );
+  } else if (!statusInput.plateFiles[WORLD_FILE]) {
+    statusNotes.push("Preparing plate layers…");
+  }
+  if (statusInput.hiddenPlateGroups > 0 && statusInput.ageInMyr > 0) {
+    statusNotes.push("Some plates have no rotation poles at this age (hidden)");
+  }
+  if (statusInput.ageInMyr > 0) {
+    const lodFileName = lodFileFromHeight(statusInput.cameraHeightM);
+    if (lodFileName !== WORLD_FILE) {
+      if (statusInput.isPlaying) statusNotes.push("Pause to load detail at this age");
+      else if (!statusInput.plateFiles[lodFileName]) {
+        statusNotes.push(`Detail for this zoom in the past is still being prepared (${lodFileName})`);
+      }
+    }
+  }
+  return statusNotes.join(" · ");
+}

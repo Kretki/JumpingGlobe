@@ -1,100 +1,146 @@
-import lodJson from "../../lod.json";
+/** LOD selection from lod.json (shared with the Python server): files, edge budgets and request limits per camera height. */
 
-export type LandLod = number;
+import lodSettings from "../../lod.json";
+import type { BoundingBox } from "./boundingBox";
 
-export type LodHeightBand = {
-  file: string;
-  fromHeightM: number;
-  orderNum: number;
-};
+/** LOD level (``orderNum`` in lod.json). */
+export type LodLevel = number;
 
-export const WORLD_FILE = lodJson.worldFile;
+// lod.json member names (worldFile, bands, orderNum, fromHeightM, ...) are the config file format.
+type LodBand = (typeof lodSettings.bands)[number];
+type HeightRow = (typeof lodSettings.fromHeightM)[number];
 
-export const WORLD_BBOX = { west: -180, south: -85, east: 180, north: 85 };
+export const WORLD_FILE = lodSettings.worldFile;
 
-const bandsSorted = [...lodJson.bands].sort((a, b) => a.orderNum - b.orderNum);
+export const WORLD_BOUNDS: BoundingBox = { westEdge: -180, southEdge: -85, eastEdge: 180, northEdge: 85 };
 
-const fileByOrderNum = new Map<number, string>(
-  lodJson.bands.map((b) => [b.orderNum, b.file])
-);
+const DEFAULT_BAND: LodBand = { file: WORLD_FILE, orderNum: 0, maxEdgeM: 25000, maxBoundaryEdgeM: 25000 };
+const DEFAULT_HEIGHT_ROW: HeightRow = { orderNum: 0, height: 0, minAreaDeg2: 0, featureLimit: 4000 };
 
-function bandByOrderNum(n: number) {
-  const exact = lodJson.bands.find((b) => b.orderNum === n);
-  if (exact) return exact;
-  if (bandsSorted.length === 0) {
-    return { file: WORLD_FILE, orderNum: 0, maxEdgeM: 25000, maxBoundaryEdgeM: 25000 };
+const sortedBands = [...lodSettings.bands].sort((firstBand, secondBand) => firstBand.orderNum - secondBand.orderNum);
+const fileByOrderNum = new Map<number, string>(lodSettings.bands.map((bandEntry) => [bandEntry.orderNum, bandEntry.file]));
+
+/**
+ * Band of a LOD level, falling back to the nearest configured band.
+ *
+ * Usage: edge budgets of a tessellation LOD.
+ *
+ * @param orderNumber - LOD level.
+ * @returns The band entry.
+ */
+function bandByOrderNum(orderNumber: number): LodBand {
+  const exactBand = lodSettings.bands.find((bandEntry) => bandEntry.orderNum === orderNumber);
+  if (exactBand) return exactBand;
+  if (sortedBands.length === 0) return DEFAULT_BAND;
+  if (orderNumber <= sortedBands[0].orderNum) return sortedBands[0];
+  return sortedBands[sortedBands.length - 1];
+}
+
+/**
+ * The fromHeightM row that applies at a camera height.
+ *
+ * Usage: every height-based lookup below.
+ *
+ * @param heightMeters - Camera height above the surface.
+ * @returns First row (by descending height) the camera is above; the lowest row otherwise.
+ */
+function heightRowAt(heightMeters: number): HeightRow {
+  const heightRows = [...lodSettings.fromHeightM].sort((firstRow, secondRow) => secondRow.height - firstRow.height);
+  if (heightRows.length === 0) return DEFAULT_HEIGHT_ROW;
+
+  const matchIndex = heightRows.findIndex((heightRow) => heightMeters > heightRow.height);
+  if (matchIndex === -1) return heightRows[heightRows.length - 1];
+
+  return heightRows[Math.max(matchIndex - 1, 0)];
+}
+
+/**
+ * GeoPackage file to load at a camera height.
+ *
+ * Usage: choose the detail layer for the current view.
+ *
+ * @param heightMeters - Camera height.
+ * @returns LOD file name (the world file when unmapped).
+ */
+export function lodFileFromHeight(heightMeters: number): string {
+  return fileByOrderNum.get(heightRowAt(heightMeters).orderNum) ?? WORLD_FILE;
+}
+
+/**
+ * LOD level of a file name.
+ *
+ * Usage: tessellation LOD of loaded data.
+ *
+ * @param fileName - GeoPackage file name.
+ * @returns The configured level, a ``lodN`` number in the name, or the first band's level.
+ */
+export function meshLodFromFile(fileName: string): LodLevel {
+  const namedBand = lodSettings.bands.find((bandEntry) => bandEntry.file === fileName);
+  if (namedBand && Number.isFinite(namedBand.orderNum)) return namedBand.orderNum;
+  const lodMatch = /lod(\d+)/i.exec(fileName);
+  if (lodMatch) {
+    const levelNumber = Number(lodMatch[1]);
+    if (Number.isFinite(levelNumber)) return levelNumber;
   }
-  if (n <= bandsSorted[0].orderNum) return bandsSorted[0];
-  return bandsSorted[bandsSorted.length - 1];
+  return sortedBands[0]?.orderNum ?? 0;
 }
 
-function rowAtHeight(heightM: number) {
-  const rows = [...lodJson.fromHeightM].sort((a, b) => b.height - a.height);
-  if (rows.length === 0) {
-    return {
-      orderNum: 0,
-      height: 0,
-      minAreaDeg2: 0,
-      featureLimit: 4000,
-    };
-  }
-  for (const r of rows) {
-    if (heightM > r.height) return r;
-  }
-  return rows[rows.length - 1];
+/**
+ * Tessellation LOD at a camera height.
+ *
+ * Usage: detail meshes are tessellated for the view, not for the file.
+ *
+ * @param heightMeters - Camera height.
+ * @returns LOD level.
+ */
+export function meshLodFromHeight(heightMeters: number): LodLevel {
+  return heightRowAt(heightMeters).orderNum;
 }
 
-export const LOD_HEIGHT_BANDS: LodHeightBand[] = lodJson.fromHeightM.flatMap((h) => {
-  const file = fileByOrderNum.get(h.orderNum);
-  if (!file) return [];
-  return [{ file, fromHeightM: h.height, orderNum: h.orderNum }];
-});
-
-function bandAtHeight(heightM: number): LodHeightBand | undefined {
-  const row = rowAtHeight(heightM);
-  const file = fileByOrderNum.get(row.orderNum) ?? WORLD_FILE;
-  return { file, fromHeightM: row.height, orderNum: row.orderNum };
+/**
+ * Minimum polygon envelope area requested at a camera height.
+ *
+ * Usage: ``min_area`` query parameter.
+ *
+ * @param heightMeters - Camera height.
+ * @returns Area in deg².
+ */
+export function minAreaFromHeight(heightMeters: number): number {
+  return heightRowAt(heightMeters).minAreaDeg2;
 }
 
-export function lodFileFromHeight(heightM: number): string {
-  return bandAtHeight(heightM)?.file ?? WORLD_FILE;
+/**
+ * Maximum feature count requested at a camera height.
+ *
+ * Usage: ``limit`` query parameter.
+ *
+ * @param heightMeters - Camera height.
+ * @returns Feature limit.
+ */
+export function featureLimitFromHeight(heightMeters: number): number {
+  return heightRowAt(heightMeters).featureLimit;
 }
 
-export function isWorldLod(heightM: number): boolean {
-  return lodFileFromHeight(heightM) === WORLD_FILE;
+/**
+ * Interior edge budget of a LOD.
+ *
+ * Usage: mesh refinement.
+ *
+ * @param orderNumber - LOD level.
+ * @returns Maximum edge length in metres.
+ */
+export function maxEdgeMFromOrderNum(orderNumber: number): number {
+  return bandByOrderNum(orderNumber).maxEdgeM;
 }
 
-export function meshLodFromFile(file: string): LandLod {
-  const byName = lodJson.bands.find((b) => b.file === file);
-  if (byName && Number.isFinite(byName.orderNum)) return byName.orderNum;
-  const m = /lod(\d+)/i.exec(file);
-  if (m) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n)) return n;
-  }
-  return bandsSorted[0]?.orderNum ?? 0;
-}
-
-export function lodFromHeight(heightM: number): LandLod {
-  return rowAtHeight(heightM).orderNum;
-}
-
-export function meshLodFromHeight(heightM: number): LandLod {
-  return rowAtHeight(heightM).orderNum;
-}
-
-export function minAreaFromHeight(heightM: number): number {
-  return rowAtHeight(heightM).minAreaDeg2;
-}
-
-export function featureLimitFromHeight(heightM: number): number {
-  return rowAtHeight(heightM).featureLimit;
-}
-
-export function maxEdgeMFromOrderNum(n: number): number {
-  return bandByOrderNum(n).maxEdgeM;
-}
-
-export function maxBoundaryEdgeMFromOrderNum(n: number): number {
-  return bandByOrderNum(n).maxBoundaryEdgeM;
+/**
+ * Boundary edge budget of a LOD.
+ *
+ * Usage: ring densification before triangulation.
+ *
+ * @param orderNumber - LOD level.
+ * @returns Maximum boundary edge length in metres.
+ */
+export function maxBoundaryEdgeMFromOrderNum(orderNumber: number): number {
+  return bandByOrderNum(orderNumber).maxBoundaryEdgeM;
 }

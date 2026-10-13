@@ -1,11 +1,11 @@
 /** Move plate-tagged land meshes to their position at a given age (CPU, per vertex). */
 
-import type { LandMesh, PlateGroup } from "../land/mesh";
-import { IDENTITY, quatRotate, type Quat, type RotationTree } from "./rotation";
+import { WGS84_ECC_SQUARED, WGS84_SEMI_MAJOR } from "../geodesy/wgs84Ellipsoid";
+import type { LandMesh, PlateGroup } from "../land/meshTypes";
+import { IDENTITY_QUAT, quatRotate, type Quaternion } from "./quaternionMath";
+import type { RotationTree } from "./rotationTree";
 
-const WGS84_A = 6378137.0;
-const WGS84_F = 1 / 298.257223563;
-const WGS84_E2 = WGS84_F * (2 - WGS84_F);
+const BOWRING_ITERATIONS = 3;
 
 /**
  * Present-day mesh in rotation-friendly form. GPlates rotates lon/lat as points
@@ -15,96 +15,141 @@ const WGS84_E2 = WGS84_F * (2 - WGS84_F);
  * to another latitude.
  */
 export type PlateMesh = {
-  unit: Float32Array;
-  height: Float32Array;
+  unitVectors: Float32Array;
+  heightsMeters: Float32Array;
   groupIdx: Uint16Array;
-  groups: PlateGroup[];
-  indices: Uint32Array;
+  plateGroups: PlateGroup[];
+  triangleIndices: Uint32Array;
   positions: Float32Array;
-  normals: Float32Array;
+  vertexNormals: Float32Array;
   /** Any group carries a real plate id (false for untagged LOD files). */
-  tagged: boolean;
+  isTagged: boolean;
 };
 
-export function preparePlateMesh(mesh: LandMesh): PlateMesh {
-  const n = mesh.positions.length / 3;
-  const unit = new Float32Array(n * 3);
-  const height = new Float32Array(n);
-  const P = mesh.positions;
-  for (let i = 0; i < n; i++) {
-    const x = P[i * 3];
-    const y = P[i * 3 + 1];
-    const z = P[i * 3 + 2];
-    const p = Math.hypot(x, y);
+export type ReconstructStats = { groupCount: number; shownCount: number; noRotation: number; notYetFormed: number };
+
+/**
+ * Convert a land mesh into rotation-friendly form.
+ *
+ * Usage: once per loaded mesh, before reconstruct.
+ *
+ * @param landMesh - Present-day mesh.
+ * @returns PlateMesh with its own copies of positions and normals (rewritten per age).
+ */
+export function preparePlateMesh(landMesh: LandMesh): PlateMesh {
+  const vertexCount = landMesh.positions.length / 3;
+  const unitVectors = new Float32Array(vertexCount * 3);
+  const heightsMeters = new Float32Array(vertexCount);
+  const positionData = landMesh.positions;
+  for (let vertexIdx = 0; vertexIdx < vertexCount; vertexIdx++) {
+    const ecefPointX = positionData[vertexIdx * 3];
+    const ecefPointY = positionData[vertexIdx * 3 + 1];
+    const ecefPointZ = positionData[vertexIdx * 3 + 2];
+    const planarDist = Math.hypot(ecefPointX, ecefPointY);
     // Bowring-style fixed point; land sits within metres of the ellipsoid.
-    let lat = Math.atan2(z, p * (1 - WGS84_E2));
-    for (let k = 0; k < 3; k++) {
-      const s = Math.sin(lat);
-      const N = WGS84_A / Math.sqrt(1 - WGS84_E2 * s * s);
-      lat = Math.atan2(z + WGS84_E2 * N * s, p);
+    let latitudeRad = Math.atan2(ecefPointZ, planarDist * (1 - WGS84_ECC_SQUARED));
+    for (let iteration = 0; iteration < BOWRING_ITERATIONS; iteration++) {
+      const sinIterate = Math.sin(latitudeRad);
+      const primeVertical = WGS84_SEMI_MAJOR / Math.sqrt(1 - WGS84_ECC_SQUARED * sinIterate * sinIterate);
+      latitudeRad = Math.atan2(ecefPointZ + WGS84_ECC_SQUARED * primeVertical * sinIterate, planarDist);
     }
-    const sinLat = Math.sin(lat);
-    const cosLat = Math.cos(lat);
-    const N = WGS84_A / Math.sqrt(1 - WGS84_E2 * sinLat * sinLat);
-    height[i] = Math.abs(cosLat) > 1e-9 ? p / cosLat - N : Math.abs(z) - N * (1 - WGS84_E2);
-    const lon = Math.atan2(y, x);
-    unit[i * 3] = cosLat * Math.cos(lon);
-    unit[i * 3 + 1] = cosLat * Math.sin(lon);
-    unit[i * 3 + 2] = sinLat;
+    const sinLatitude = Math.sin(latitudeRad);
+    const cosLatitude = Math.cos(latitudeRad);
+    const primeVertical = WGS84_SEMI_MAJOR / Math.sqrt(1 - WGS84_ECC_SQUARED * sinLatitude * sinLatitude);
+    heightsMeters[vertexIdx] =
+      Math.abs(cosLatitude) > 1e-9
+        ? planarDist / cosLatitude - primeVertical
+        : Math.abs(ecefPointZ) - primeVertical * (1 - WGS84_ECC_SQUARED);
+    const longitudeRad = Math.atan2(ecefPointY, ecefPointX);
+    unitVectors[vertexIdx * 3] = cosLatitude * Math.cos(longitudeRad);
+    unitVectors[vertexIdx * 3 + 1] = cosLatitude * Math.sin(longitudeRad);
+    unitVectors[vertexIdx * 3 + 2] = sinLatitude;
   }
   return {
-    unit,
-    height,
-    groupIdx: mesh.groupIdx,
-    groups: mesh.groups,
-    indices: mesh.indices,
-    positions: new Float32Array(mesh.positions),
-    normals: new Float32Array(mesh.normals),
-    tagged: mesh.groups.some((g) => g.plateId !== 0),
+    unitVectors,
+    heightsMeters,
+    groupIdx: landMesh.groupIdx,
+    plateGroups: landMesh.plateGroups,
+    triangleIndices: landMesh.triangleIndices,
+    positions: new Float32Array(landMesh.positions),
+    vertexNormals: new Float32Array(landMesh.vertexNormals),
+    isTagged: landMesh.plateGroups.some((plateGroup) => plateGroup.plateNumber !== 0),
   };
 }
 
-export type ReconstructStats = { groups: number; shown: number; noRotation: number; notYetFormed: number };
-
 /**
- * Rewrite `pm.positions` / `pm.normals` for `age` (Ma). Groups outside their
- * lifetime, or whose plate chain has no poles at that age, collapse to the origin
- * (zero-area triangles, i.e. not drawn).
+ * Rotation of every plate group at an age (null = hidden).
+ *
+ * Usage: first step of reconstruct.
+ *
+ * @param plateGroups - Groups of the mesh.
+ * @param rotationTree - Rotation model, or null (identity).
+ * @param ageInMyr - Age in Ma.
+ * @param reconstructStats - Statistics to update.
+ * @returns One quaternion (or null) per group.
  */
-export function reconstruct(pm: PlateMesh, tree: RotationTree | null, age: number): ReconstructStats {
-  const stats: ReconstructStats = { groups: pm.groups.length, shown: 0, noRotation: 0, notYetFormed: 0 };
-  const quats: (Quat | null)[] = pm.groups.map((g) => {
-    if (age > g.fromAge || age < g.toAge) {
-      stats.notYetFormed++;
+function groupRotations(
+  plateGroups: PlateGroup[],
+  rotationTree: RotationTree | null,
+  ageInMyr: number,
+  reconstructStats: ReconstructStats
+): (Quaternion | null)[] {
+  return plateGroups.map((plateGroup) => {
+    if (ageInMyr > plateGroup.appearAgeMa || ageInMyr < plateGroup.vanishAgeMa) {
+      reconstructStats.notYetFormed++;
       return null;
     }
-    const q = !tree || age <= 0 || g.plateId === 0 ? IDENTITY : tree.total(g.plateId, age);
-    if (!q) stats.noRotation++;
-    else stats.shown++;
-    return q;
+    const groupQuat =
+      !rotationTree || ageInMyr <= 0 || plateGroup.plateNumber === 0
+        ? IDENTITY_QUAT
+        : rotationTree.totalRotation(plateGroup.plateNumber, ageInMyr);
+    if (!groupQuat) reconstructStats.noRotation++;
+    else reconstructStats.shownCount++;
+    return groupQuat;
   });
+}
 
-  const { unit: U, height: H, groupIdx: G, positions: P, normals: Nrm } = pm;
-  const v = [0, 0, 0];
-  const n = H.length;
-  for (let i = 0; i < n; i++) {
-    const q = quats[G[i]];
-    const o = i * 3;
-    if (!q) {
-      P[o] = P[o + 1] = P[o + 2] = 0;
+/**
+ * Rewrite a plate mesh's positions and normals for an age.
+ *
+ * Usage: whenever the timeline age changes. Groups outside their lifetime, or whose
+ * plate chain has no poles at that age, collapse to the origin (zero-area
+ * triangles, i.e. not drawn).
+ *
+ * @param plateMesh - Mesh to update in place.
+ * @param rotationTree - Rotation model, or null (identity).
+ * @param ageInMyr - Age in Ma.
+ * @returns Counts of shown and hidden groups.
+ */
+export function reconstruct(plateMesh: PlateMesh, rotationTree: RotationTree | null, ageInMyr: number): ReconstructStats {
+  const reconstructStats: ReconstructStats = {
+    groupCount: plateMesh.plateGroups.length,
+    shownCount: 0,
+    noRotation: 0,
+    notYetFormed: 0,
+  };
+  const rotationList = groupRotations(plateMesh.plateGroups, rotationTree, ageInMyr, reconstructStats);
+  const { unitVectors, heightsMeters, groupIdx, positions, vertexNormals } = plateMesh;
+  const rotatedUnit = [0, 0, 0];
+  const vertexCount = heightsMeters.length;
+  for (let vertexIdx = 0; vertexIdx < vertexCount; vertexIdx++) {
+    const vertexQuat = rotationList[groupIdx[vertexIdx]];
+    const baseOffset = vertexIdx * 3;
+    if (!vertexQuat) {
+      positions[baseOffset] = positions[baseOffset + 1] = positions[baseOffset + 2] = 0;
       continue;
     }
-    quatRotate(q, U[o], U[o + 1], U[o + 2], v);
-    const sinLat = v[2];
-    const N = WGS84_A / Math.sqrt(1 - WGS84_E2 * sinLat * sinLat);
-    const h = H[i];
-    P[o] = (N + h) * v[0];
-    P[o + 1] = (N + h) * v[1];
-    P[o + 2] = (N * (1 - WGS84_E2) + h) * v[2];
-    // Ellipsoid normal at geodetic (lon, lat) is exactly the rotated unit vector.
-    Nrm[o] = v[0];
-    Nrm[o + 1] = v[1];
-    Nrm[o + 2] = v[2];
+    quatRotate(vertexQuat, unitVectors[baseOffset], unitVectors[baseOffset + 1], unitVectors[baseOffset + 2], rotatedUnit);
+    const sinLatitude = rotatedUnit[2];
+    const primeVertical = WGS84_SEMI_MAJOR / Math.sqrt(1 - WGS84_ECC_SQUARED * sinLatitude * sinLatitude);
+    const heightMeters = heightsMeters[vertexIdx];
+    positions[baseOffset] = (primeVertical + heightMeters) * rotatedUnit[0];
+    positions[baseOffset + 1] = (primeVertical + heightMeters) * rotatedUnit[1];
+    positions[baseOffset + 2] = (primeVertical * (1 - WGS84_ECC_SQUARED) + heightMeters) * rotatedUnit[2];
+    // The ellipsoid normal at geodetic (lon, lat) is exactly the rotated unit vector.
+    vertexNormals[baseOffset] = rotatedUnit[0];
+    vertexNormals[baseOffset + 1] = rotatedUnit[1];
+    vertexNormals[baseOffset + 2] = rotatedUnit[2];
   }
-  return stats;
+  return reconstructStats;
 }

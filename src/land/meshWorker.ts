@@ -1,103 +1,80 @@
-/** Web Worker: FeatureCollection → ECEF land mesh (transferable buffers). */
+/** Web Worker: FeatureCollection → ECEF land mesh (typed arrays are transferred, not copied). */
 
-import {
-  featureCollectionToMesh,
-  type GeoJsonFeatureCollection,
-  type MeshBBox,
-  type MeshStats,
-  type PlateGroup,
-} from "./mesh";
+import type { BoundingBox } from "./boundingBox";
+import { featureCollectionToMesh } from "./meshBuilder";
+import type { GeoJsonFeatureCollection, LandMesh } from "./meshTypes";
 
 export type MeshWorkerRequest = {
-  seq: number;
-  lod: number;
-  fc: GeoJsonFeatureCollection;
-  bbox?: MeshBBox;
-  heightM?: number;
+  sequenceId: number;
+  lodLevel: number;
+  featureCollection: GeoJsonFeatureCollection;
+  clipBounds?: BoundingBox;
+  cameraHeightM?: number;
 };
 
 export type MeshWorkerProgress = {
-  type: "progress";
-  seq: number;
-  phase: "mesh";
-  done: number;
-  total: number;
-  percent: number;
+  messageKind: "progress";
+  sequenceId: number;
+  doneCount: number;
+  totalCount: number;
+  percentDone: number;
 };
 
-export type MeshWorkerResponse =
-  | {
-      type: "result";
-      seq: number;
-      ok: true;
-      positions: Float32Array;
-      normals: Float32Array;
-      indices: Uint32Array;
-      groupIdx: Uint16Array;
-      groups: PlateGroup[];
-      featureCount: number;
-      triangleCount: number;
-      stats: MeshStats;
-    }
-  | {
-      type: "result";
-      seq: number;
-      ok: false;
-      error: string;
-    }
-  | MeshWorkerProgress;
+export type MeshWorkerResult =
+  | { messageKind: "result"; sequenceId: number; succeeded: true; landMesh: LandMesh }
+  | { messageKind: "result"; sequenceId: number; succeeded: false; errorText: string };
 
-self.onmessage = (ev: MessageEvent<MeshWorkerRequest>) => {
-  const { seq, lod, fc, bbox, heightM } = ev.data;
+export type MeshWorkerResponse = MeshWorkerResult | MeshWorkerProgress;
+
+const PROGRESS_INTERVAL_MS = 40;
+
+/**
+ * Post a message from the worker, optionally transferring buffers.
+ *
+ * Usage: every response of this worker.
+ *
+ * @param workerMessage - Response to send.
+ * @param transferList - Buffers to transfer.
+ * @returns Nothing.
+ */
+function postToMain(workerMessage: MeshWorkerResponse, transferList: ArrayBuffer[] = []): void {
+  (self as unknown as Worker).postMessage(workerMessage, transferList);
+}
+
+/**
+ * Mesh one request and post progress messages and the result.
+ *
+ * Usage: the worker's message handler.
+ *
+ * @param meshRequest - Request from MeshWorkerClient.
+ * @returns Nothing.
+ */
+function handleRequest(meshRequest: MeshWorkerRequest): void {
+  const { sequenceId, lodLevel, featureCollection, clipBounds, cameraHeightM } = meshRequest;
   try {
-    let lastEmit = 0;
-    const mesh = featureCollectionToMesh(
-      fc,
-      lod,
-      (done, total) => {
-        const now = Date.now();
-        if (done < total && now - lastEmit < 40) return;
-        lastEmit = now;
-        const percent = total > 0 ? Math.round((done / total) * 100) : 100;
-        const prog: MeshWorkerProgress = {
-          type: "progress",
-          seq,
-          phase: "mesh",
-          done,
-          total,
-          percent,
-        };
-        (self as unknown as Worker).postMessage(prog);
+    let lastEmitMs = 0;
+    const landMesh = featureCollectionToMesh(
+      featureCollection,
+      lodLevel,
+      (doneCount, totalCount) => {
+        const nowMillis = Date.now();
+        if (doneCount < totalCount && nowMillis - lastEmitMs < PROGRESS_INTERVAL_MS) return;
+        lastEmitMs = nowMillis;
+        const percentDone = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 100;
+        postToMain({ messageKind: "progress", sequenceId, doneCount, totalCount, percentDone });
       },
-      { bbox, heightM }
+      { clipBounds, cameraHeightM }
     );
-    const res: MeshWorkerResponse = {
-      type: "result",
-      seq,
-      ok: true,
-      positions: mesh.positions,
-      normals: mesh.normals,
-      indices: mesh.indices,
-      groupIdx: mesh.groupIdx,
-      groups: mesh.groups,
-      featureCount: mesh.featureCount,
-      triangleCount: mesh.triangleCount,
-      stats: mesh.stats,
-    };
-    const transfer: ArrayBuffer[] = [
-      mesh.positions.buffer as ArrayBuffer,
-      mesh.normals.buffer as ArrayBuffer,
-      mesh.indices.buffer as ArrayBuffer,
-      mesh.groupIdx.buffer as ArrayBuffer,
-    ];
-    (self as unknown as Worker).postMessage(res, transfer);
-  } catch (err) {
-    const res: MeshWorkerResponse = {
-      type: "result",
-      seq,
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-    (self as unknown as Worker).postMessage(res);
+    postToMain({ messageKind: "result", sequenceId, succeeded: true, landMesh }, [
+      landMesh.positions.buffer as ArrayBuffer,
+      landMesh.vertexNormals.buffer as ArrayBuffer,
+      landMesh.triangleIndices.buffer as ArrayBuffer,
+      landMesh.groupIdx.buffer as ArrayBuffer,
+    ]);
+  } catch (caughtError) {
+    const errorText = caughtError instanceof Error ? caughtError.message : String(caughtError);
+    postToMain({ messageKind: "result", sequenceId, succeeded: false, errorText });
   }
-};
+}
+
+self.onmessage = (messageEvent: MessageEvent<MeshWorkerRequest>) => handleRequest(messageEvent.data);
