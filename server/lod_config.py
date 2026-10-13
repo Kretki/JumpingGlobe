@@ -15,10 +15,14 @@ WORLD_FILE = str(_CFG["worldFile"])
 FULL_RESOLUTION_FILE = str(_CFG.get("fullResolutionFile") or "land_polygons.gpkg")
 BANDS: list[dict[str, Any]] = list(_CFG.get("bands") or [])
 
-# Plate reconstruction (Merdith et al. 2021): rotation file and the plate-tagged
-# continental-crust layer that sits in dataDir next to the land LODs.
+# Plate reconstruction (Merdith et al. 2021): rotation file, plus derived files in
+# dataDir built by public/data/merdith_prep.sh (see server/plate_data.py).
 ROTATION_FILE = (ROOT / str(_CFG.get("rotationFile") or "public/data/meredith_rot/meredith.rot")).resolve()
-CONTINENTS_FILE = str(_CFG.get("continentsFile") or "merdith_continents.gpkg")
-# Plate-tagged copy of the world LOD (built by merdith_prep.sh; moves on the timeline).
-PLATE_WORLD_FILE = str(_CFG.get("plateWorldFile") or WORLD_FILE.replace(".gpkg", "_plates.gpkg"))
 MERDITH_DIR = ROTATION_FILE.parent
+STATIC_POLYGONS_FILE = str(_CFG.get("staticPolygonsFile") or "merdith_static.gpkg")
+BAND_FILES: list[str] = [str(b["file"]) for b in sorted(BANDS, key=lambda b: b.get("orderNum", 0))]
+
+
+def plates_file(lod_file: str) -> str:
+    """Plate-tagged twin of a land LOD file."""
+    return lod_file[: -len(".gpkg")] + "_plates.gpkg" if lod_file.endswith(".gpkg") else lod_file + "_plates"

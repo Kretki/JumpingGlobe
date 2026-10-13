@@ -1,9 +1,20 @@
-import { LandLoader, bboxContains, viewBBox, viewHalfAngle, type BBox } from "./land/loader";
-import { WORLD_FILE, lodFileFromHeight } from "./land/lod.config";
+import { LandLoader, bboxContains, viewBBox, viewHalfAngle, visibleGroundRadiusDeg, type BBox } from "./land/loader";
+import { WORLD_FILE, featureLimitFromHeight, lodFileFromHeight, minAreaFromHeight } from "./land/lod.config";
 import type { LandMesh } from "./land/mesh";
 import { preparePlateMesh, reconstruct, type PlateMesh, type ReconstructStats } from "./plates/reconstruct";
 import { RotationTree, type RotationModel } from "./plates/rotation";
 import { Timeline } from "./plates/timeline";
+import {
+  computeTrack,
+  formatLonLat,
+  lonLatToUnit,
+  parseStaticPolygons,
+  plateAt,
+  positionAt,
+  unitToLonLat,
+  type StaticPolygon,
+  type TrackedPoint,
+} from "./plates/pointTrack";
 
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
 const coordsEl = document.getElementById("coords") as HTMLDivElement;
@@ -46,38 +57,38 @@ precision mediump float;
 #endif
 varying vec3 vNormal;
 varying vec3 vWorldPos;
-uniform vec3 uLightPos;
 uniform vec3 uCameraPos;
 uniform vec3 uBaseColor;
-uniform float uClipLand;
+uniform float uClipLand;  // 0 none · 1 lon/lat box · 2 spherical cap
 uniform vec4 uClipBBox;
+uniform vec4 uClipCap;    // cap centre (unit vector, GPlates sphere) + cos(radius)
 
 void main() {
   if (uClipLand > 0.5) {
-    float lon = atan(vWorldPos.y, vWorldPos.x) * 57.2957795;
-    // Geodetic latitude (same as the EPSG:4326 bbox); for near-surface points
+    float lonR = atan(vWorldPos.y, vWorldPos.x);
+    // Geodetic latitude (same as the EPSG:4326 data); for near-surface points
     // tan(geodetic) = z / ((1 - e²) p). Geocentric would be off by up to 0.19°.
-    float lat = atan(vWorldPos.z, 0.99330562 * length(vWorldPos.xy)) * 57.2957795;
-    float west = uClipBBox.x;
-    float south = uClipBBox.y;
-    float east = uClipBBox.z;
-    float north = uClipBBox.w;
-    bool inLat = lat >= south && lat <= north;
-    bool inLon = west <= east ? (lon >= west && lon <= east) : (lon >= west || lon <= east);
-    if (inLat && inLon) discard;
+    float latR = atan(vWorldPos.z, 0.99330562 * length(vWorldPos.xy));
+    if (uClipLand < 1.5) {
+      float lon = lonR * 57.2957795;
+      float lat = latR * 57.2957795;
+      bool inLat = lat >= uClipBBox.y && lat <= uClipBBox.w;
+      bool inLon = uClipBBox.x <= uClipBBox.z
+        ? (lon >= uClipBBox.x && lon <= uClipBBox.z)
+        : (lon >= uClipBBox.x || lon <= uClipBBox.z);
+      if (inLat && inLon) discard;
+    } else {
+      vec3 u = vec3(cos(latR) * cos(lonR), cos(latR) * sin(lonR), sin(latR));
+      if (dot(u, uClipCap.xyz) >= uClipCap.w) discard;
+    }
   }
 
+  // Lit evenly from all directions: no sun, so no dark side or hot spot; a soft
+  // view-facing term keeps the globe readable as a sphere.
   vec3 n = normalize(vNormal);
-  vec3 l = normalize(uLightPos - vWorldPos);
   vec3 v = normalize(uCameraPos - vWorldPos);
-  vec3 h = normalize(l + v);
-
-  float diff = max(dot(n, l), 0.0);
-  float spec = pow(max(dot(n, h), 0.0), 32.0);
-  float ambient = 0.18;
-
-  vec3 color = uBaseColor * (ambient + diff * 0.85) + vec3(1.0) * spec * 0.25;
-  gl_FragColor = vec4(color, 1.0);
+  float facing = max(dot(n, v), 0.0);
+  gl_FragColor = vec4(uBaseColor * (0.8 + 0.2 * facing), 1.0);
 }
 `;
 
@@ -282,10 +293,13 @@ function makeLandSlot(): LandSlot {
 }
 
 const baseSlot = makeLandSlot();
-/** Merdith continental crust (incl. shelves and vanished terranes), drawn under the land. */
-const crustSlot = makeLandSlot();
 const detailSlot = makeLandSlot();
-let detailBBox: BBox | null = null;
+/**
+ * Where the base (world) mesh is hidden because detail covers it: a lon/lat box
+ * for present-day tiles, a spherical cap around the view centre in the past.
+ */
+type LandClip = { kind: "bbox"; bbox: BBox } | { kind: "cap"; center: [number, number, number]; cosR: number };
+let detailClip: LandClip | null = null;
 let loadedViewBBox: BBox | null = null;
 
 function uploadSlot(slot: LandSlot, mesh: LandMesh) {
@@ -333,11 +347,11 @@ const aPosition = gl.getAttribLocation(program, "aPosition");
 const aNormal = gl.getAttribLocation(program, "aNormal");
 const uMVP = gl.getUniformLocation(program, "uMVP");
 const uModel = gl.getUniformLocation(program, "uModel");
-const uLightPos = gl.getUniformLocation(program, "uLightPos");
 const uCameraPos = gl.getUniformLocation(program, "uCameraPos");
 const uBaseColor = gl.getUniformLocation(program, "uBaseColor");
 const uClipLand = gl.getUniformLocation(program, "uClipLand");
 const uClipBBox = gl.getUniformLocation(program, "uClipBBox");
+const uClipCap = gl.getUniformLocation(program, "uClipCap");
 
 let yaw = 0.6;
 let pitch = 0.35;
@@ -472,30 +486,30 @@ let rotationModelError = false;
 let currentAge = 0;
 let ageDirty = false;
 let basePlates: PlateMesh | null = null;
-let crustPlates: PlateMesh | null = null;
-let showCrust = true;
+/** Past-time detail mesh (plate-tagged, present-day coordinates). */
+let detailPlates: PlateMesh | null = null;
+/** What the past detail covers: view centre/radius at an age (GPlates sphere). */
+let loadedPast: { file: string; age: number; lon: number; lat: number; radiusDeg: number } | null = null;
 /** Server-side plate layers: "building" on first start, then "ready". */
 let plateStatus: { status: string; detail: string } = { status: "loading", detail: "" };
-let lastReconstruct: { base?: ReconstructStats; crust?: ReconstructStats } = {};
-const crustLoader = new LandLoader("/api");
+/** LOD file -> plate-tagged twin, for twins the server has finished. */
+let plateFiles: Record<string, string> = {};
+let staticFile: string | null = null;
+let lastReconstruct: { base?: ReconstructStats } = {};
 const plateWorldLoader = new LandLoader("/api");
 
-const timeline = new Timeline(
-  (age) => {
-    currentAge = age;
-    ageDirty = true;
-    if (age > 0 && (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE)) clearDetail();
-  },
-  (visible) => {
-    showCrust = visible;
-  }
-);
+const timeline = new Timeline((age) => {
+  currentAge = age;
+  ageDirty = true;
+  // Detail is valid for one age only; a paused timeline reloads it (scheduleLandLoad).
+  if (detailSlot.indexCount > 0 || loadedPast || (age > 0 && lastLoadFile !== WORLD_FILE)) clearDetail();
+});
 
 type PlateStatusResponse = {
   status: "ready" | "building" | "failed" | "unavailable";
   detail: string;
-  plateWorldFile: string | null;
-  continentsFile: string | null;
+  plateFiles: Record<string, string>;
+  staticFile: string | null;
 };
 
 async function loadRotationModel() {
@@ -514,8 +528,9 @@ async function loadRotationModel() {
   updateTimelineStatus();
 }
 
-/** Wait for the server's plate layers (built once in the background), then load them. */
+/** Follow the server's background build: world twin first (seconds), detail twins later. */
 async function pollPlateLayers() {
+  let worldRequested = false;
   while (!landDisposed) {
     let st: PlateStatusResponse;
     try {
@@ -528,14 +543,16 @@ async function pollPlateLayers() {
       return;
     }
     plateStatus = { status: st.status, detail: st.detail };
-    updateTimelineStatus();
-    if (st.status === "ready") {
-      if (st.plateWorldFile) void loadPlateWorld(st.plateWorldFile);
-      if (st.continentsFile) void loadCrust(st.continentsFile);
-      return;
+    plateFiles = st.plateFiles ?? {};
+    staticFile = st.staticFile;
+    const worldTwin = plateFiles[WORLD_FILE];
+    if (worldTwin && !worldRequested) {
+      worldRequested = true;
+      void loadPlateWorld(worldTwin);
     }
+    updateTimelineStatus();
     if (st.status !== "building") return;
-    await new Promise((r) => window.setTimeout(r, 2000));
+    await new Promise((r) => window.setTimeout(r, 3000));
   }
 }
 
@@ -554,15 +571,6 @@ function setBasePlates(mesh: LandMesh) {
   updateTimelineStatus();
 }
 
-async function loadCrust(file: string) {
-  const result = await crustLoader.loadWorld(file, 0, 100_000);
-  if (landDisposed || !result) return;
-  crustPlates = preparePlateMesh(result.mesh);
-  lastReconstruct.crust = reconstruct(crustPlates, rotationTree, currentAge);
-  uploadPlateSlot(crustSlot, crustPlates, true);
-  updateTimelineStatus();
-}
-
 /** Re-pose the plate-tagged layers for the current age (once per frame at most). */
 function applyAge() {
   if (!ageDirty) return;
@@ -571,24 +579,335 @@ function applyAge() {
     lastReconstruct.base = reconstruct(basePlates, rotationTree, currentAge);
     uploadPlateSlot(baseSlot, basePlates, false);
   }
-  if (crustPlates) {
-    lastReconstruct.crust = reconstruct(crustPlates, rotationTree, currentAge);
-    uploadPlateSlot(crustSlot, crustPlates, false);
-  }
+  updateSelectionPanel();
   updateTimelineStatus();
 }
 
 function updateTimelineStatus() {
   const notes: string[] = [];
   if (rotationModelError) notes.push("Rotation model unavailable — is the API server running (npm run server)?");
-  else if (plateStatus.status === "building") notes.push("Preparing plate layers (one-time, about a minute)…");
   else if (plateStatus.status === "failed" || plateStatus.status === "unavailable") {
     notes.push(`Plate layers unavailable: ${plateStatus.detail || plateStatus.status} (see public/data/lods/merdith_prep.log)`);
+  } else if (!plateFiles[WORLD_FILE]) notes.push("Preparing plate layers…");
+  if ((lastReconstruct.base?.noRotation ?? 0) > 0 && currentAge > 0) {
+    notes.push("Some plates have no rotation poles at this age (hidden)");
   }
-  const hidden = (lastReconstruct.base?.noRotation ?? 0) + (lastReconstruct.crust?.noRotation ?? 0);
-  if (currentAge > 0 && hidden > 0) notes.push("Some plates have no rotation poles at this age (hidden)");
-  if (currentAge > 0 && lodFileFromHeight(height) !== WORLD_FILE) notes.push("Past ages use the world LOD only");
+  if (currentAge > 0) {
+    const file = lodFileFromHeight(height);
+    if (file !== WORLD_FILE) {
+      if (timeline.isPlaying) notes.push("Pause to load detail at this age");
+      else if (!plateFiles[file]) notes.push(`Detail for this zoom in the past is still being prepared (${file})`);
+    }
+  }
   timeline.setStatus(notes.join(" · "));
+}
+
+function angularDistanceDeg(lon1: number, lat1: number, lon2: number, lat2: number): number {
+  const a = lonLatToUnit(lon1, lat1);
+  const b = lonLatToUnit(lon2, lat2);
+  return (Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180) / Math.PI;
+}
+
+/**
+ * Paused in the past: load detail of the plate-tagged LOD around the view centre
+ * as it was at the current age. The server rotates the view cap back to
+ * present-day coordinates per plate; the mesh is then reconstructed here.
+ */
+function schedulePastLoad(lon: number, lat: number, h: number, file: string, twin: string) {
+  const halfAngle = viewHalfAngle(FOVY, canvas.width / Math.max(canvas.height, 1));
+  const visR = visibleGroundRadiusDeg(h, halfAngle);
+  const age = currentAge;
+  if (loadedPast && loadedPast.file === twin && loadedPast.age === age && detailSlot.indexCount > 0) {
+    // Still inside the loaded cap with a 5% margin: nothing to do.
+    if (angularDistanceDeg(lon, lat, loadedPast.lon, loadedPast.lat) + visR * 1.05 <= loadedPast.radiusDeg) return;
+  }
+  if (lon === lastQueuedLon && lat === lastQueuedLat && h === lastQueuedH) return;
+  lastQueuedLon = lon;
+  lastQueuedLat = lat;
+  lastQueuedH = h;
+
+  window.clearTimeout(landLoadTimer);
+  landLoadTimer = window.setTimeout(async () => {
+    if (landDisposed || timeline.isPlaying || currentAge !== age || !rotationTree) return;
+    const radiusDeg = Math.min(90, visR * 1.3 + 0.02);
+    setLandProgress(0, "Starting…", true);
+    landStatus = "loading…";
+    const result = await landLoader.loadPast({
+      file: twin,
+      age,
+      lon,
+      lat,
+      radiusDeg,
+      heightM: h,
+      minArea: minAreaFromHeight(h),
+      limit: featureLimitFromHeight(h),
+    });
+    if (landDisposed || !result || currentAge !== age || timeline.isPlaying) return;
+    if (lodFileFromHeight(height) !== file) return;
+    detailPlates = preparePlateMesh(result.mesh);
+    reconstruct(detailPlates, rotationTree, age);
+    uploadPlateSlot(detailSlot, detailPlates, true);
+    loadedPast = { file: twin, age, lon, lat, radiusDeg };
+    // Hide the world layer inside the cap the detail fully covers.
+    detailClip = { kind: "cap", center: lonLatToUnit(lon, lat), cosR: Math.cos((radiusDeg * Math.PI) / 180) };
+    lastLoadFile = file;
+    landStatus = resultStatus(`${age.toFixed(0)} Ma `, result);
+    setLandProgress(100, landStatus, true);
+  }, 250);
+}
+
+// ---- Selected point (click the globe) ----
+let statics: StaticPolygon[] | null = null;
+let staticsLoading: Promise<StaticPolygon[] | null> | null = null;
+let selection: (TrackedPoint & { maxTrackAge: number }) | null = null;
+
+const pointPanel = document.getElementById("point-panel") as HTMLElement;
+const ppPlate = document.getElementById("pp-plate") as HTMLElement;
+const ppPresent = document.getElementById("pp-present") as HTMLElement;
+const ppAgeLabel = document.getElementById("pp-age-label") as HTMLElement;
+const ppAt = document.getElementById("pp-at") as HTMLElement;
+const ppTrack = document.getElementById("pp-track") as HTMLElement;
+const ppNote = document.getElementById("pp-note") as HTMLElement;
+(document.getElementById("pp-clear") as HTMLButtonElement).addEventListener("click", () => clearSelection());
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") clearSelection();
+});
+
+function loadStatics(): Promise<StaticPolygon[] | null> {
+  if (statics) return Promise.resolve(statics);
+  if (!staticFile) return Promise.resolve(null);
+  if (!staticsLoading) {
+    const params = new URLSearchParams({ file: staticFile, bbox: "-180,-90,180,90", limit: "100000", min_area: "0" });
+    staticsLoading = fetch(`/api/land?${params}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((fc) => (statics = parseStaticPolygons(fc)))
+      .catch((err) => {
+        console.warn("static polygons unavailable", err);
+        staticsLoading = null;
+        return null;
+      });
+  }
+  return staticsLoading;
+}
+
+function clearSelection() {
+  selection = null;
+  pointPanel.hidden = true;
+  ppNote.textContent = "";
+}
+
+async function selectAt(lon: number, lat: number) {
+  if (!rotationTree) return;
+  pointPanel.hidden = false;
+  const list = await loadStatics();
+  if (!list) {
+    ppPlate.textContent = "—";
+    ppNote.textContent = "Plate polygons are still being prepared — try again in a moment.";
+    return;
+  }
+  const hit = plateAt(list, rotationTree, lon, lat, currentAge);
+  if (!hit) {
+    selection = null;
+    ppPlate.textContent = "none";
+    ppPresent.textContent = "—";
+    ppAgeLabel.textContent = `At ${currentAge.toFixed(0)} Ma`;
+    ppAt.textContent = formatLonLat(lon, lat);
+    ppTrack.textContent = "—";
+    ppNote.textContent = "No plate in the model covers this point at this age.";
+    return;
+  }
+  const maxTrackAge = Math.min(rotationTree.maxAge, hit.poly.fromAge);
+  selection = {
+    plateId: hit.poly.plateId,
+    name: hit.poly.name,
+    fromAge: hit.poly.fromAge,
+    toAge: hit.poly.toAge,
+    unit0: hit.unit0,
+    presentLon: hit.presentLon,
+    presentLat: hit.presentLat,
+    // 0.25 Myr steps keep the line smooth even through fast (~2°/Myr) motion.
+    track: computeTrack(rotationTree, hit.poly, hit.unit0, maxTrackAge, 0.25),
+    maxTrackAge,
+  };
+  ppNote.textContent = "";
+  updateSelectionPanel();
+  uploadTrack();
+}
+
+function updateSelectionPanel() {
+  if (!selection || !rotationTree) return;
+  const sel = selection;
+  ppPlate.textContent = `${sel.plateId}${sel.name ? ` · ${sel.name}` : ""}`;
+  ppPresent.textContent = formatLonLat(sel.presentLon, sel.presentLat);
+  ppAgeLabel.textContent = `At ${currentAge.toFixed(0)} Ma`;
+  const u = positionAt(rotationTree, sel, sel.unit0, currentAge);
+  if (u) {
+    const [lo, la] = unitToLonLat(u);
+    ppAt.textContent = formatLonLat(lo, la);
+  } else {
+    ppAt.textContent = currentAge > sel.fromAge ? "not formed yet" : "no rotation data";
+  }
+  const shown = sel.track.filter((t) => t.unit).length;
+  ppTrack.textContent = shown ? `0 – ${sel.maxTrackAge.toFixed(0)} Ma${shown < sel.track.length ? " (gaps)" : ""}` : "—";
+}
+
+// Click (not drag) on the globe selects a point.
+let downX = 0;
+let downY = 0;
+let downT = 0;
+canvas.addEventListener("pointerdown", (e) => {
+  downX = e.clientX;
+  downY = e.clientY;
+  downT = performance.now();
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4 || performance.now() - downT > 600) return;
+  const hit = pickGlobe(e.clientX, e.clientY);
+  if (hit) void selectAt(hit[0], hit[1]);
+});
+
+/** Lon/lat (geodetic) of the globe surface under a client pixel, or null for space. */
+function pickGlobe(clientX: number, clientY: number): [number, number] | null {
+  const rect = canvas.getBoundingClientRect();
+  const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const ny = 1 - ((clientY - rect.top) / rect.height) * 2;
+  const eye = cameraPos();
+  const f = [-eye[0], -eye[1], -eye[2]];
+  const fl = Math.hypot(f[0], f[1], f[2]);
+  for (let i = 0; i < 3; i++) f[i] /= fl;
+  const up = Math.abs(pitch) > 1.2 ? [-Math.sin(yaw), -Math.cos(yaw), 0] : [0, 0, 1];
+  const r = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0]];
+  const rl = Math.hypot(r[0], r[1], r[2]);
+  for (let i = 0; i < 3; i++) r[i] /= rl;
+  const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+  const t = Math.tan(FOVY / 2);
+  const aspect = rect.width / rect.height;
+  const d = [0, 1, 2].map((k) => f[k] + nx * t * aspect * r[k] + ny * t * u[k]);
+  const A2 = WGS84_A * WGS84_A;
+  const B2 = WGS84_B * WGS84_B;
+  const qa = (d[0] * d[0] + d[1] * d[1]) / A2 + (d[2] * d[2]) / B2;
+  const qb = 2 * ((eye[0] * d[0] + eye[1] * d[1]) / A2 + (eye[2] * d[2]) / B2);
+  const qc = (eye[0] * eye[0] + eye[1] * eye[1]) / A2 + (eye[2] * eye[2]) / B2 - 1;
+  const disc = qb * qb - 4 * qa * qc;
+  if (disc < 0) return null;
+  const s = (-qb - Math.sqrt(disc)) / (2 * qa);
+  if (s <= 0) return null;
+  const g = ecefToGeodetic(eye[0] + s * d[0], eye[1] + s * d[1], eye[2] + s * d[2]);
+  return [g.lon, g.lat];
+}
+
+// ---- Selection overlay: track line, present-day dot, current-age marker ----
+const overlayProgram = createProgram(
+  `
+attribute vec3 aPos;
+uniform mat4 uMVP;
+uniform float uLift;
+uniform float uPointSize;
+void main() {
+  gl_Position = uMVP * vec4(aPos * (1.0 + uLift), 1.0);
+  gl_PointSize = uPointSize;
+}
+`,
+  `
+precision mediump float;
+uniform vec4 uColor;
+uniform float uRound;
+void main() {
+  if (uRound > 0.5) {
+    vec2 d = gl_PointCoord - 0.5;
+    if (dot(d, d) > 0.25) discard;
+  }
+  gl_FragColor = uColor;
+}
+`
+);
+const oPos = gl.getAttribLocation(overlayProgram, "aPos");
+const oMVP = gl.getUniformLocation(overlayProgram, "uMVP");
+const oLift = gl.getUniformLocation(overlayProgram, "uLift");
+const oPointSize = gl.getUniformLocation(overlayProgram, "uPointSize");
+const oColor = gl.getUniformLocation(overlayProgram, "uColor");
+const oRound = gl.getUniformLocation(overlayProgram, "uRound");
+const trackBuf = gl.createBuffer()!;
+const markerBuf = gl.createBuffer()!;
+let trackSegments: [number, number][] = [];
+
+/** Surface point (ellipsoid) for a GPlates-sphere unit vector. */
+function surfacePoint(u: ArrayLike<number>, out: Float32Array, o: number) {
+  const N = WGS84_A / Math.sqrt(1 - WGS84_E2 * u[2] * u[2]);
+  out[o] = N * u[0];
+  out[o + 1] = N * u[1];
+  out[o + 2] = N * (1 - WGS84_E2) * u[2];
+}
+
+function uploadTrack() {
+  trackSegments = [];
+  if (!selection) return;
+  const pts = new Float32Array(selection.track.length * 3);
+  let n = 0;
+  let segStart = -1;
+  for (const t of selection.track) {
+    if (t.unit) {
+      if (segStart < 0) segStart = n;
+      surfacePoint(t.unit, pts, n * 3);
+      n++;
+    } else if (segStart >= 0) {
+      trackSegments.push([segStart, n - segStart]);
+      segStart = -1;
+    }
+  }
+  if (segStart >= 0) trackSegments.push([segStart, n - segStart]);
+  gl!.bindBuffer(gl!.ARRAY_BUFFER, trackBuf);
+  gl!.bufferData(gl!.ARRAY_BUFFER, pts.subarray(0, n * 3), gl!.STATIC_DRAW);
+}
+
+function drawSelection(mvp: Mat4) {
+  if (!selection || !rotationTree) return;
+  const g = gl!;
+  g.useProgram(overlayProgram);
+  // Marker ring + fill share a depth: LEQUAL lets the fill draw over the ring.
+  g.depthFunc(g.LEQUAL);
+  g.disableVertexAttribArray(aNormal);
+  g.uniformMatrix4fv(oMVP, false, mvp);
+  // Lift above the land (which floats up to ~600 m on coarse LODs) proportionally
+  // to the view distance, so it stays on top without visible parallax.
+  g.uniform1f(oLift, Math.min(40_000, Math.max(30, height * 0.004)) / WGS84_A);
+  g.enableVertexAttribArray(oPos);
+
+  if (trackSegments.length) {
+    g.bindBuffer(g.ARRAY_BUFFER, trackBuf);
+    g.vertexAttribPointer(oPos, 3, g.FLOAT, false, 0, 0);
+    g.uniform4f(oColor, 1.0, 0.84, 0.25, 1.0);
+    g.uniform1f(oRound, 1);
+    g.uniform1f(oPointSize, 3);
+    for (const [start, count] of trackSegments) {
+      if (count > 1) g.drawArrays(g.LINE_STRIP, start, count);
+      else g.drawArrays(g.POINTS, start, count);
+    }
+  }
+
+  const now = positionAt(rotationTree, selection, selection.unit0, currentAge);
+  const mk = new Float32Array(6);
+  surfacePoint(selection.unit0, mk, 0);
+  if (now) surfacePoint(now, mk, 3);
+  g.bindBuffer(g.ARRAY_BUFFER, markerBuf);
+  g.bufferData(g.ARRAY_BUFFER, mk, g.DYNAMIC_DRAW);
+  g.vertexAttribPointer(oPos, 3, g.FLOAT, false, 0, 0);
+  g.uniform1f(oRound, 1);
+  // Present-day position: small white dot (where the track starts).
+  g.uniform4f(oColor, 1, 1, 1, 1);
+  g.uniform1f(oPointSize, 7);
+  g.drawArrays(g.POINTS, 0, 1);
+  if (now) {
+    // Position at the shown age: white-ringed red marker.
+    g.uniform1f(oPointSize, 15);
+    g.drawArrays(g.POINTS, 1, 1);
+    g.uniform4f(oColor, 1.0, 0.35, 0.31, 1);
+    g.uniform1f(oPointSize, 10);
+    g.drawArrays(g.POINTS, 1, 1);
+  }
+  g.disableVertexAttribArray(oPos);
+  g.depthFunc(g.LESS);
+  g.useProgram(program);
 }
 
 void loadRotationModel();
@@ -640,7 +959,9 @@ function clearDetail() {
   landLoader.cancelView();
   landLoader.evictDetail();
   clearSlot(detailSlot);
-  detailBBox = null;
+  detailClip = null;
+  detailPlates = null;
+  loadedPast = null;
   loadedViewBBox = null;
   lastLoadFile = WORLD_FILE;
   lastLoadLon = NaN;
@@ -659,11 +980,17 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
   if (landDisposed) return;
   void ensureWorld();
   const file = lodFileFromHeight(h);
-  // Detail LODs are present-day bbox tiles; in the past each plate has moved,
-  // so only the (reconstructed) world layer is shown.
+  // In the past each plate has moved: detail comes from the plate-tagged twin of
+  // the LOD, per plate, and only while the timeline is paused.
   if (currentAge > 0) {
-    window.clearTimeout(landLoadTimer);
-    if (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE) clearDetail();
+    const twin = plateFiles[file];
+    if (file === WORLD_FILE || !twin || timeline.isPlaying || !baseReady) {
+      window.clearTimeout(landLoadTimer);
+      if (detailSlot.indexCount > 0 || lastLoadFile !== WORLD_FILE) clearDetail();
+      return;
+    }
+    if (lastLoadFile !== file && detailSlot.indexCount > 0) clearDetail();
+    schedulePastLoad(lon, lat, h, file, twin);
     return;
   }
   if (file === WORLD_FILE) {
@@ -705,7 +1032,7 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
     uploadSlot(detailSlot, result.mesh);
     loadedViewBBox = result.bbox;
     // Base is hidden exactly where the detail data is complete (no overlap band).
-    detailBBox = result.bbox;
+    detailClip = { kind: "bbox", bbox: result.bbox };
     lastLoadFile = result.file;
     landStatus = resultStatus("", result);
     setLandProgress(100, landStatus, true);
@@ -717,12 +1044,10 @@ function disposeLand() {
   landDisposed = true;
   window.clearTimeout(landLoadTimer);
   landLoader.dispose();
-  crustLoader.dispose();
   plateWorldLoader.dispose();
   destroySlot(detailSlot);
   destroySlot(baseSlot);
-  destroySlot(crustSlot);
-  detailBBox = null;
+  detailClip = null;
   loadedViewBBox = null;
   baseReady = false;
 }
@@ -734,7 +1059,7 @@ function updateCoords(surface: number[], eye: number[]) {
     `<div>lat ${fmt(g.lat, 6)}° · lon ${fmt(g.lon, 6)}°</div>` +
     `<div>ECEF ${fmt(surface[0], 1)}, ${fmt(surface[1], 1)}, ${fmt(surface[2], 1)} m</div>` +
     `<div>camera height ${fmt(height, 1)} m</div>` +
-    `<div>lod ${currentAge > 0 ? WORLD_FILE : lodFileFromHeight(height)}</div>` +
+    `<div>lod ${currentAge > 0 && timeline.isPlaying ? WORLD_FILE : lodFileFromHeight(height)}</div>` +
     `<div>age ${currentAge.toFixed(0)} Ma</div>` +
     `<div>land ${landStatus}</div>`;
   scheduleLandLoad(g.lon, g.lat, height);
@@ -750,7 +1075,7 @@ function drawMesh(
   mvp: Mat4,
   model: Mat4,
   eye: number[],
-  clip: BBox | null = null
+  clip: LandClip | null = null
 ) {
   gl!.bindBuffer(gl!.ARRAY_BUFFER, pos);
   gl!.enableVertexAttribArray(aPosition);
@@ -763,12 +1088,14 @@ function drawMesh(
   gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, idx);
   gl!.uniformMatrix4fv(uMVP, false, mvp);
   gl!.uniformMatrix4fv(uModel, false, model);
-  gl!.uniform3f(uLightPos, WGS84_A * 2, WGS84_A * 1.5, WGS84_A * 3);
   gl!.uniform3f(uCameraPos, eye[0], eye[1], eye[2]);
   gl!.uniform3f(uBaseColor, color[0], color[1], color[2]);
-  if (clip) {
+  if (clip?.kind === "bbox") {
     gl!.uniform1f(uClipLand, 1);
-    gl!.uniform4f(uClipBBox, clip.west, clip.south, clip.east, clip.north);
+    gl!.uniform4f(uClipBBox, clip.bbox.west, clip.bbox.south, clip.bbox.east, clip.bbox.north);
+  } else if (clip?.kind === "cap") {
+    gl!.uniform1f(uClipLand, 2);
+    gl!.uniform4f(uClipCap, clip.center[0], clip.center[1], clip.center[2], clip.cosR);
   } else {
     gl!.uniform1f(uClipLand, 0);
   }
@@ -820,25 +1147,8 @@ function frame() {
   gl!.enable(gl!.CULL_FACE);
   gl!.frontFace(gl!.CCW);
   gl!.cullFace(gl!.BACK);
-  if (showCrust && crustSlot.indexCount > 0) {
-    // Under the land: no depth writes, so coastlines always draw on top of it.
-    gl!.depthMask(false);
-    drawMesh(
-      crustSlot.pos,
-      crustSlot.nrm,
-      crustSlot.idx,
-      crustSlot.indexCount,
-      gl!.UNSIGNED_INT,
-      [0.5, 0.45, 0.34],
-      mvp,
-      model,
-      eye
-    );
-    gl!.depthMask(true);
-  }
   if (baseSlot.indexCount > 0) {
-    const clip =
-      detailSlot.indexCount > 0 && detailBBox ? detailBBox : null;
+    const clip = detailSlot.indexCount > 0 ? detailClip : null;
     drawMesh(
       baseSlot.pos,
       baseSlot.nrm,
@@ -868,6 +1178,8 @@ function frame() {
     );
     gl!.disable(gl!.POLYGON_OFFSET_FILL);
   }
+
+  drawSelection(mvp);
 
   requestAnimationFrame(frame);
 }

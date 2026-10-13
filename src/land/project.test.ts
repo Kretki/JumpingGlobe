@@ -227,7 +227,6 @@ function assert(cond: boolean, msg: string) {
   const tree = new RotationTree({
     maxAge: 100,
     anchorPlate: 0,
-    continentsFile: null,
     plates: {
       // plate 1 spins 90° about the pole over 100 Myr relative to the anchor
       "1": [[0, 90, 0, 0, 0], [100, 90, 0, 90, 0]],

@@ -16,7 +16,6 @@ export type RotationPole = [number, number, number, number, number];
 export type RotationModel = {
   maxAge: number;
   anchorPlate: number;
-  continentsFile: string | null;
   plates: Record<string, RotationPole[]>;
 };
 

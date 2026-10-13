@@ -1074,6 +1074,13 @@ export function featureCollectionToMesh(
     }
     const g = f.geometry;
     let tris = 0;
+    // Past-time detail: each plate's piece of the view lies in a different
+    // present-day box, so features may carry their own clip.
+    const clip = f.properties?.clip;
+    const featureClip: MeshBBox | undefined =
+      Array.isArray(clip) && clip.length === 4
+        ? { west: clip[0], south: clip[1], east: clip[2], north: clip[3] }
+        : clipBBox;
     if (g.type === "Polygon") {
       report(0.25);
       tris = processPolygonRings(
@@ -1083,7 +1090,7 @@ export function featureCollectionToMesh(
         normals,
         indices,
         stats,
-        clipBBox
+        featureClip
       );
     } else if (g.type === "MultiPolygon") {
       const polys = g.coordinates as number[][][][];
@@ -1097,7 +1104,7 @@ export function featureCollectionToMesh(
           normals,
           indices,
           stats,
-          clipBBox
+          featureClip
         );
       }
     }

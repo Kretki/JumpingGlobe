@@ -25,8 +25,6 @@ from fastapi.middleware.gzip import GZipMiddleware
 try:
     from server.gpkg_reader import LandGpkgStore
     from server.lod_config import (
-        CONTINENTS_FILE,
-        PLATE_WORLD_FILE,
         DATA_DIR,
         FULL_RESOLUTION_FILE,
         ROOT,
@@ -34,12 +32,10 @@ try:
         WORLD_FILE,
     )
     from server.plate_data import PlateData
-    from server.rotation import parse_rot
+    from server.rotation import RotationTree, parse_rot
 except ImportError:  # running as `python app.py` inside server/
     from gpkg_reader import LandGpkgStore
     from lod_config import (
-        CONTINENTS_FILE,
-        PLATE_WORLD_FILE,
         DATA_DIR,
         FULL_RESOLUTION_FILE,
         ROOT,
@@ -47,7 +43,7 @@ except ImportError:  # running as `python app.py` inside server/
         WORLD_FILE,
     )
     from plate_data import PlateData
-    from rotation import parse_rot
+    from rotation import RotationTree, parse_rot
 
 store = LandGpkgStore(DATA_DIR)
 
@@ -91,6 +87,7 @@ def _rotations_json(mtime_ns: int) -> bytes:
 
 def _plate_data_rebuilt() -> None:
     _land_json.cache_clear()
+    _past_json.cache_clear()
 
 
 plate_data = PlateData(on_rebuilt=_plate_data_rebuilt)
@@ -105,17 +102,54 @@ def rotations() -> Response:
     return Response(content=body, media_type="application/json")
 
 
+@lru_cache(maxsize=1)
+def _rotation_tree(mtime_ns: int) -> RotationTree:
+    return RotationTree(parse_rot(ROTATION_FILE))
+
+
 @app.get("/api/plates/status")
 def plates_status() -> dict:
     """Readiness of the plate layers; the client polls this while they are built."""
     plate_data.ensure()
-    ready = plate_data.status == "ready"
     return {
         "status": plate_data.status,
         "detail": plate_data.detail,
-        "plateWorldFile": PLATE_WORLD_FILE if ready else None,
-        "continentsFile": CONTINENTS_FILE if ready else None,
+        # LOD file -> plate-tagged twin, only for twins that are already built
+        "plateFiles": plate_data.ready_plate_files(),
+        "staticFile": plate_data.static_file(),
     }
+
+
+@lru_cache(maxsize=16)
+def _past_json(
+    file: str, age: float, lon: float, lat: float, radius: float, limit: int, min_area: float, mtime_ns: int
+) -> bytes:
+    tree = _rotation_tree(ROTATION_FILE.stat().st_mtime_ns)
+    fc = store.query_past(file, tree, age, lon, lat, radius, limit=limit, min_area=min_area)
+    return json.dumps(fc, separators=(",", ":")).encode("utf-8")
+
+
+@app.get("/api/land/past")
+def land_past(
+    file: str = Query(..., description="Plate-tagged GPKG (see /api/plates/status plateFiles)"),
+    age: float = Query(..., ge=0.0, description="Reconstruction age in Ma"),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="View centre at `age` (degrees)"),
+    lat: float = Query(..., ge=-90.0, le=90.0),
+    radius: float = Query(..., gt=0.0, le=90.0, description="View cap radius in degrees"),
+    limit: int = Query(25000, ge=1, le=100000),
+    min_area: float = Query(0.0, ge=0.0),
+) -> Response:
+    """Detail land around a view centre as it was at `age` (pieces still in present-day coordinates)."""
+    if not ROTATION_FILE.is_file():
+        raise HTTPException(status_code=404, detail="Rotation file not found")
+    try:
+        mtime = store.resolve_file(file).stat().st_mtime_ns
+        body = _past_json(file, age, lon, lat, radius, limit, min_area, mtime)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=body, media_type="application/json")
 
 
 @app.get("/api/land/stats")

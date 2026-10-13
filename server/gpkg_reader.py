@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 import threading
 from pathlib import Path
@@ -247,6 +248,9 @@ class LandGpkgStore:
             "features": features,
         }
 
+    def _has_column(self, conn: sqlite3.Connection, name: str) -> bool:
+        return any(row[1] == name for row in conn.execute("PRAGMA table_info(land_polygons)"))
+
     def _plate_columns(self, conn: sqlite3.Connection) -> bool:
         """True when the file was plate-tagged by tools/plate_tag.py."""
         cols = {row[1] for row in conn.execute("PRAGMA table_info(land_polygons)")}
@@ -265,8 +269,9 @@ class LandGpkgStore:
         if self._plate_columns(conn):
             # Plate pieces are filtered/sorted by their ORIGINAL land polygon's
             # envelope so a continent cut into plates is kept or dropped as a whole.
-            sql = """
-                SELECT p.fid, p.geom, p.plate_id, p.from_age, p.to_age
+            name_col = "p.name" if self._has_column(conn, "name") else "NULL"
+            sql = f"""
+                SELECT p.fid, p.geom, p.plate_id, p.from_age, p.to_age, {name_col}
                 FROM rtree_land_polygons_geom r
                 JOIN land_polygons p ON p.fid = r.id
                 WHERE r.maxx >= ? AND r.minx <= ?
@@ -284,6 +289,7 @@ class LandGpkgStore:
                         "plate_id": int(row[2] or 0),
                         "from_age": float(row[3] if row[3] is not None else 1e6),
                         "to_age": float(row[4] or 0.0),
+                        **({"name": row[5]} if row[5] else {}),
                     },
                 )
                 for row in cur
@@ -304,6 +310,110 @@ class LandGpkgStore:
         cur = conn.execute(sql, (west, east, south, north, min_area, limit))
         return [(int(row[0]), bytes(row[1]), {}) for row in cur]
 
+    def _plate_extents(self, file: str, conn: sqlite3.Connection) -> dict[int, tuple[float, float, float, float]]:
+        """Present-day lon/lat envelope of each plate's pieces (cached per file version)."""
+        key = (file, self.resolve_file(file).stat().st_mtime_ns)
+        cache: dict = self.__dict__.setdefault("_extent_cache", {})
+        if key not in cache:
+            rows = conn.execute(
+                """
+                SELECT p.plate_id, MIN(r.minx), MIN(r.miny), MAX(r.maxx), MAX(r.maxy)
+                FROM rtree_land_polygons_geom r JOIN land_polygons p ON p.fid = r.id
+                GROUP BY p.plate_id
+                """
+            ).fetchall()
+            cache[key] = {int(r[0]): (r[1], r[2], r[3], r[4]) for r in rows}
+        return cache[key]
+
+    def query_past(
+        self,
+        file: str,
+        tree: Any,
+        age: float,
+        lon: float,
+        lat: float,
+        radius_deg: float,
+        *,
+        limit: int = 25000,
+        min_area: float = 0.0,
+    ) -> dict[str, Any]:
+        """
+        Land of a plate-tagged file that lies within `radius_deg` of (lon, lat) AT `age`.
+
+        Each plate has moved differently, so the view cap is rotated back to
+        present-day coordinates per plate (inverse of the plate's total rotation)
+        and that plate's pieces are queried there. Every feature carries
+        `clip` = the present-day box used for its plate, so the client can clip it
+        before reconstructing it to `age`.
+        """
+        try:
+            from server.rotation import lonlat_to_unit, quat_conj, quat_rotate, unit_to_lonlat
+        except ImportError:
+            from rotation import lonlat_to_unit, quat_conj, quat_rotate, unit_to_lonlat
+
+        conn = self._conn(file)
+        if not self._plate_columns(conn):
+            raise ValueError(f"{file} is not plate-tagged")
+        limit = max(1, min(int(limit), 100_000))
+        center = lonlat_to_unit(lon, lat)
+        memo: dict = {}
+        features: list[dict[str, Any]] = []
+        plates_used = 0
+        for plate, env in self._plate_extents(file, conn).items():
+            if len(features) >= limit:
+                break
+            q = tree.total(plate, age, memo)
+            if q is None:
+                continue
+            lon0, lat0 = unit_to_lonlat(quat_rotate(quat_conj(q), center))
+            clip = cap_bbox(lon0, lat0, radius_deg)
+            boxes = [clip] if clip[0] <= clip[2] else [(clip[0], clip[1], 180.0, clip[3]), (-180.0, clip[1], clip[2], clip[3])]
+            hit = False
+            for w, s_, e, n in boxes:
+                if env[0] > e or env[2] < w or env[1] > n or env[3] < s_:
+                    continue
+                rows = conn.execute(
+                    """
+                    SELECT p.fid, p.geom, p.from_age, p.to_age
+                    FROM rtree_land_polygons_geom r JOIN land_polygons p ON p.fid = r.id
+                    WHERE r.maxx >= ? AND r.minx <= ? AND r.maxy >= ? AND r.miny <= ?
+                      AND p.plate_id = ? AND p.from_age >= ? AND p.to_age <= ?
+                      AND p.src_env_area >= ?
+                    ORDER BY p.src_env_area DESC
+                    LIMIT ?
+                    """,
+                    (w, e, s_, n, plate, age, age, min_area, limit - len(features)),
+                ).fetchall()
+                for fid, blob, from_age, to_age in rows:
+                    geometry = gpkg_blob_to_geojson(bytes(blob))
+                    if geometry is None:
+                        continue
+                    hit = True
+                    features.append(
+                        {
+                            "type": "Feature",
+                            "id": int(fid),
+                            "properties": {
+                                "plate_id": plate,
+                                "from_age": float(from_age),
+                                "to_age": float(to_age or 0.0),
+                                "clip": list(clip),
+                            },
+                            "geometry": geometry,
+                        }
+                    )
+            plates_used += hit
+        return {
+            "type": "FeatureCollection",
+            "file": file,
+            "age": age,
+            "center": [lon, lat],
+            "radius": radius_deg,
+            "plates": plates_used,
+            "count": len(features),
+            "features": features,
+        }
+
     def stats(self, name: str) -> dict[str, Any]:
         conn = self._conn(name)
         count = conn.execute("SELECT COUNT(*) FROM land_polygons").fetchone()[0]
@@ -315,3 +425,18 @@ class LandGpkgStore:
             "srs": "EPSG:4326",
             "size_bytes": path.stat().st_size if path.is_file() else 0,
         }
+
+
+def cap_bbox(lon: float, lat: float, radius_deg: float) -> tuple[float, float, float, float]:
+    """(west, south, east, north) enclosing a spherical cap; west > east wraps the antimeridian."""
+    south = max(-90.0, lat - radius_deg)
+    north = min(90.0, lat + radius_deg)
+    cos_lat = math.cos(math.radians(lat))
+    sin_r = math.sin(math.radians(min(radius_deg, 90.0)))
+    if north >= 89.999 or south <= -89.999 or sin_r >= cos_lat:
+        return (-180.0, south, 180.0, north)
+    half = math.degrees(math.asin(sin_r / cos_lat))
+    if half >= 179.9:
+        return (-180.0, south, 180.0, north)
+    norm = lambda x: ((x + 180.0) % 360.0) - 180.0
+    return (norm(lon - half), south, norm(lon + half), north)

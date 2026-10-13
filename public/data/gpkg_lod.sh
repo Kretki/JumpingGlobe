@@ -78,10 +78,11 @@ write_lod 5    111    0
 printf 'Removing unnecessary data\n'
 rm -rf -- "$work" "${dest_dir}/${name}"
 
-# Plate reconstruction: cut the fresh LODs by Merdith static polygons and build
-# the continental-crust layer (no-op when the Merdith files are not present).
+# Plate reconstruction: plate-tagged copies of the fresh LODs (no-op without the
+# Merdith files). The API server would also rebuild them on its next start.
 merdith_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/meredith_rot"
 if [ -f "${merdith_dir}/meredith.rot" ]; then
   printf 'Plate-tagging LODs (merdith_prep.sh)\n'
-  "$(dirname -- "${BASH_SOURCE[0]}")/merdith_prep.sh" "$dest_dir" "$merdith_dir"
+  "$(dirname -- "${BASH_SOURCE[0]}")/merdith_prep.sh" "$dest_dir" "$merdith_dir" \
+    land_lod0.gpkg land_lod1.gpkg land_lod2.gpkg land_lod3.gpkg land_lod4.gpkg land_lod5.gpkg
 fi

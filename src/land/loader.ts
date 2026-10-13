@@ -43,6 +43,8 @@ export type LandLoadProgress = {
   total?: number;
 };
 
+export type PastQuery = { age: number; lon: number; lat: number; radiusDeg: number };
+
 export type LandProgressFn = (p: LandLoadProgress) => void;
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -405,6 +407,28 @@ export class LandLoader {
     });
   }
 
+  /**
+   * Detail land around a view centre as it was at `age` (paused timeline). The
+   * mesh stays in present-day coordinates, plate-tagged, to be reconstructed.
+   */
+  async loadPast(q: PastQuery & { file: string; heightM: number; minArea: number; limit: number }): Promise<LandLoadResult | null> {
+    if (this.disposed) return null;
+    const key = `past|${q.file}|${q.age}|${q.lon.toFixed(3)},${q.lat.toFixed(3)}|${q.radiusDeg.toFixed(3)}`;
+    const cached = this.viewCache.get(key);
+    if (cached) return cached;
+    const b = viewBBox(q.lon, q.lat, 0, undefined, 1);
+    return this.fetchAndMesh({
+      kind: "view",
+      file: q.file,
+      bbox: { ...b, south: Math.max(-90, q.lat - q.radiusDeg), north: Math.min(90, q.lat + q.radiusDeg) },
+      minArea: q.minArea,
+      limit: q.limit,
+      key,
+      heightM: q.heightM,
+      past: q,
+    });
+  }
+
   cancelView() {
     this.viewSeq++;
     if (this.inflightView) {
@@ -463,6 +487,8 @@ export class LandLoader {
     limit: number;
     key?: string;
     heightM?: number;
+    /** Past-time detail: /land/past around a reconstructed view centre. */
+    past?: PastQuery;
   }): Promise<LandLoadResult | null> {
     const file = opts.file;
     const bbox = opts.bbox;
@@ -479,17 +505,30 @@ export class LandLoader {
 
     const mySeq = kind === "world" ? ++this.worldSeq : ++this.viewSeq;
 
-    const params = new URLSearchParams({
-      file,
-      bbox: `${bbox.west},${bbox.south},${bbox.east},${bbox.north}`,
-      limit: String(limit),
-      min_area: String(minArea),
-    });
+    const past = opts.past;
+    const params = past
+      ? new URLSearchParams({
+          file,
+          age: String(past.age),
+          lon: String(past.lon),
+          lat: String(past.lat),
+          radius: String(past.radiusDeg),
+          limit: String(limit),
+          min_area: String(minArea),
+        })
+      : new URLSearchParams({
+          file,
+          bbox: `${bbox.west},${bbox.south},${bbox.east},${bbox.north}`,
+          limit: String(limit),
+          min_area: String(minArea),
+        });
+    // Past features carry their own per-plate clip boxes; no global clip then.
+    const meshClip = kind === "view" && !past ? bbox : undefined;
 
     try {
       this.emit({ percent: 0, phase: "fetch", label: "Fetching land…" });
 
-      const res = await fetch(`${this.baseUrl}/land?${params}`, {
+      const res = await fetch(`${this.baseUrl}/land${past ? "/past" : ""}?${params}`, {
         signal: ac.signal,
       });
       if (!res.ok) {
@@ -524,7 +563,8 @@ export class LandLoader {
           fc,
           count,
           bbox,
-          opts.heightM
+          kind === "view" ? opts.heightM : undefined,
+          meshClip
         );
       }
 
@@ -543,7 +583,7 @@ export class LandLoader {
             total,
           });
         },
-        kind === "view" ? { bbox, heightM: opts.heightM } : undefined
+        kind === "view" ? { bbox: meshClip, heightM: opts.heightM } : undefined
       );
       this.emit({ percent: 96, phase: "upload", label: "Uploading mesh…" });
       const result: LandLoadResult = {
@@ -627,7 +667,8 @@ export class LandLoader {
     fc: GeoJsonFeatureCollection,
     count: number,
     bbox: BBox,
-    heightM?: number
+    heightM?: number,
+    clip?: BBox
   ): Promise<LandLoadResult | null> {
     return new Promise((resolve) => {
       for (const [s, p] of this.pendingMesh) {
@@ -641,8 +682,8 @@ export class LandLoader {
         seq,
         lod,
         fc,
-        bbox: kind === "view" ? bbox : undefined,
-        heightM: kind === "view" ? heightM : undefined,
+        bbox: clip,
+        heightM,
       };
       this.worker!.postMessage(msg);
     });

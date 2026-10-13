@@ -3,8 +3,7 @@
   "worldFile": "land_lod0.gpkg",
   "fullResolutionFile": "land_lod5.gpkg",
   "rotationFile": "public/data/meredith_rot/meredith.rot",
-  "continentsFile": "merdith_continents.gpkg",
-  "plateWorldFile": "land_lod0_plates.gpkg",
+  "staticPolygonsFile": "merdith_static.gpkg",
   "bands": [
     { "file": "land_lod0.gpkg", "orderNum": 0, "maxEdgeM": 150000, "maxBoundaryEdgeM": 150000 },
     { "file": "land_lod1.gpkg", "orderNum": 1, "maxEdgeM": 80000, "maxBoundaryEdgeM": 80000 },
