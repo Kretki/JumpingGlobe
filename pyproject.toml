@@ -9,7 +9,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tools = [
-    "gdal==3.12.2",
+    "gdal>=3.13.0",
 ]
 
 [dependency-groups]
