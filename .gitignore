@@ -45,6 +45,8 @@ coverage/
 *~
 *.sublime-project
 *.sublime-workspace
+AGENTS.md
+UV.md
 
 # OS
 .DS_Store

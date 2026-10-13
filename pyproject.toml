@@ -1,0 +1,21 @@
+[project]
+name = "jumping-globe"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+]
+
+[project.optional-dependencies]
+tools = [
+    "gdal==3.12.2",
+]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "pip-audit==2.10.1",
+    "ruff>=0.17.0",
+    "semgrep==1.180.0",
+]
