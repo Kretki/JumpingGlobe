@@ -34,7 +34,6 @@ function rowAtHeight(heightM: number) {
     return {
       orderNum: 0,
       height: 0,
-      maxSpanDeg: 40,
       minAreaDeg2: 0,
       featureLimit: 4000,
     };
@@ -82,10 +81,6 @@ export function lodFromHeight(heightM: number): LandLod {
 
 export function meshLodFromHeight(heightM: number): LandLod {
   return rowAtHeight(heightM).orderNum;
-}
-
-export function maxSpanFromHeight(heightM: number): number {
-  return rowAtHeight(heightM).maxSpanDeg;
 }
 
 export function minAreaFromHeight(heightM: number): number {

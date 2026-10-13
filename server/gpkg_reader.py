@@ -32,18 +32,17 @@ def _f64(data: bytes, off: int, le: bool) -> tuple[float, int]:
     return struct.unpack_from(fmt, data, off)[0], off + 8
 
 
-def _read_point(data: bytes, off: int, le: bool) -> tuple[list[float], int]:
-    x, off = _f64(data, off, le)
-    y, off = _f64(data, off, le)
-    return [x, y], off
+# Decimal places kept in API output: 1e-6° ≈ 0.11 m, far below the finest LOD
+# tolerance, and it roughly halves the JSON payload vs full float repr.
+COORD_DECIMALS = 6
 
 
 def _read_ring(data: bytes, off: int, le: bool) -> tuple[list[list[float]], int]:
     n, off = _u32(data, off, le)
-    coords: list[list[float]] = []
-    for _ in range(n):
-        pt, off = _read_point(data, off, le)
-        coords.append(pt)
+    flat = struct.unpack_from(("<" if le else ">") + "%dd" % (2 * n), data, off)
+    off += 16 * n
+    nd = COORD_DECIMALS
+    coords = [[round(flat[i], nd), round(flat[i + 1], nd)] for i in range(0, 2 * n, 2)]
     return coords, off
 
 

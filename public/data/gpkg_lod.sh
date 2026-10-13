@@ -33,35 +33,47 @@ ogr2ogr -f GPKG -t_srs EPSG:4087 \
   "${work}/land_4087.gpkg" "${work}/land.gpkg" \
   -progress
 
+# EPSG:4087 is plate carrée on WGS84 (1 deg = 111319.490793 m), so an envelope
+# area in deg² (what the API's min_area filters on) is m² / DEG2_M2.
+DEG2_M2=12392029030.5
+
+# write_lod <lod> <simplify tolerance m> <min envelope area deg²>
+#
+# - No -segmentize: the client re-densifies rings geodesically to each LOD's
+#   edge budget; pre-segmentized vertices only bloated the files and made
+#   earcut produce slivers (the main cause of the slow world load).
+# - Coarse LODs drop polygons whose envelope is below half of the smallest
+#   min_area the client ever requests for that LOD (lod.json fromHeightM).
+#   They were never served, but all ~830k islands were kept in every file.
 write_lod() {
-  local lod="$1" tol_m="$2"
-  printf 'LOD%s stage (simplify %sm, segmentize %sm)\n' "$lod" "$tol_m" "$tol_m"
+  local lod="$1" tol_m="$2" min_deg2="$3"
+  local min_m2
+  min_m2="$(awk -v a="$min_deg2" -v k="$DEG2_M2" 'BEGIN { printf "%.1f", a * k }')"
+  printf 'LOD%s stage (simplify %sm, min envelope %s deg²)\n' "$lod" "$tol_m" "$min_deg2"
 
   ogr2ogr -f GPKG \
     -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY -makevalid \
     "${work}/lod${lod}_4087.gpkg" "${work}/land_4087.gpkg" \
+    -sql "SELECT * FROM land_polygons
+          WHERE (ST_MaxX(geom) - ST_MinX(geom)) * (ST_MaxY(geom) - ST_MinY(geom)) >= ${min_m2}" \
     -simplify "$tol_m" -progress
 
   ogr2ogr -f GPKG \
     -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY \
-    "${work}/lod${lod}_seg.gpkg" "${work}/lod${lod}_4087.gpkg" \
-    -segmentize "$tol_m" -progress
-
-  ogr2ogr -f GPKG \
-    -nln land_polygons -nlt PROMOTE_TO_MULTI -dim XY \
     -t_srs EPSG:4326 -wrapdateline -makevalid -lco SPATIAL_INDEX=YES \
-    "${dest_dir}/land_lod${lod}.gpkg" "${work}/lod${lod}_seg.gpkg" \
+    "${dest_dir}/land_lod${lod}.gpkg" "${work}/lod${lod}_4087.gpkg" \
     -progress
 
-  rm -f -- "${work}/lod${lod}_4087.gpkg" "${work}/lod${lod}_seg.gpkg"
+  rm -f -- "${work}/lod${lod}_4087.gpkg"
 }
 
-write_lod 0 8906
-write_lod 1 3340
-write_lod 2 1113
-write_lod 3 557
-write_lod 4 225
-write_lod 5 111
+#         lod  tol_m  min_deg2  (client min_area: lod0 world 0.5, lod1 0.5, lod2 0.4, lod3 0.005)
+write_lod 0    8906   0.25
+write_lod 1    3340   0.25
+write_lod 2    1113   0.2
+write_lod 3    557    0.0025
+write_lod 4    225    0
+write_lod 5    111    0
 
 printf 'Removing unnecessary data\n'
 rm -rf -- "$work" "${dest_dir}/${name}"

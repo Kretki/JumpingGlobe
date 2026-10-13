@@ -14,8 +14,12 @@ Run:
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Query
+import json
+from functools import lru_cache
+
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 try:
     from server.gpkg_reader import LandGpkgStore
@@ -33,6 +37,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+
+
+@lru_cache(maxsize=32)
+def _land_json(
+    file: str, west: float, south: float, east: float, north: float, limit: int, min_area: float
+) -> bytes:
+    """Serialized FeatureCollection; repeated queries (always the world view) skip SQLite + encoding."""
+    fc = store.query_bbox(file, west, south, east, north, limit=limit, min_area=min_area)
+    return json.dumps(fc, separators=(",", ":")).encode("utf-8")
 
 
 @app.get("/api/health")
@@ -74,7 +88,7 @@ def land(
         ge=0.0,
         description="Minimum envelope area in deg² (drop tiny islands when zoomed out)",
     ),
-) -> dict:
+) -> Response:
     try:
         parts = [float(x.strip()) for x in bbox.split(",")]
         if len(parts) != 4:
@@ -89,13 +103,16 @@ def land(
         raise HTTPException(status_code=400, detail="Longitude must be in [-180, 180]")
 
     try:
-        return store.query_bbox(
-            file, west, south, east, north, limit=limit, min_area=min_area
-        )
+        body = _land_json(file, west, south, east, north, limit, min_area)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 # Allow `python -m server.app` and `python server/app.py`

@@ -1,4 +1,4 @@
-import { LandLoader, bboxContains, viewBBox, type BBox } from "./land/loader";
+import { LandLoader, bboxContains, viewBBox, viewHalfAngle, type BBox } from "./land/loader";
 import { WORLD_FILE, lodFileFromHeight } from "./land/lod.config";
 import type { LandMesh } from "./land/mesh";
 
@@ -36,7 +36,11 @@ void main() {
 `;
 
 const fsSource = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float; // lon/lat clip test needs more than mediump's ~0.1°
+#else
 precision mediump float;
+#endif
 varying vec3 vNormal;
 varying vec3 vWorldPos;
 uniform vec3 uLightPos;
@@ -48,7 +52,9 @@ uniform vec4 uClipBBox;
 void main() {
   if (uClipLand > 0.5) {
     float lon = atan(vWorldPos.y, vWorldPos.x) * 57.2957795;
-    float lat = atan(vWorldPos.z, length(vWorldPos.xy)) * 57.2957795;
+    // Geodetic latitude (same as the EPSG:4326 bbox); for near-surface points
+    // tan(geodetic) = z / ((1 - e²) p). Geocentric would be off by up to 0.19°.
+    float lat = atan(vWorldPos.z, 0.99330562 * length(vWorldPos.xy)) * 57.2957795;
     float west = uClipBBox.x;
     float south = uClipBBox.y;
     float east = uClipBBox.z;
@@ -276,26 +282,6 @@ const baseSlot = makeLandSlot();
 const detailSlot = makeLandSlot();
 let detailBBox: BBox | null = null;
 let loadedViewBBox: BBox | null = null;
-
-function padClipBBox(b: BBox, pad: number): BBox {
-  const south = Math.max(-85, b.south + pad);
-  const north = Math.min(85, b.north - pad);
-  if (b.west <= b.east) {
-    if (b.east - b.west + 2 * pad >= 359) {
-      return { west: -180, south, east: 180, north };
-    }
-    let west = b.west + pad;
-    let east = b.east - pad;
-    if (west < -180) west += 360;
-    if (east > 180) east -= 360;
-    return { west, south, east, north };
-  }
-  let west = b.west + pad;
-  let east = b.east - pad;
-  if (west < -180) west += 360;
-  if (east > 180) east -= 360;
-  return { west, south, east, north };
-}
 
 function uploadSlot(slot: LandSlot, mesh: LandMesh) {
   gl!.bindBuffer(gl!.ARRAY_BUFFER, slot.pos);
@@ -533,13 +519,15 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
   }
   if (!baseReady) return;
 
-  const next = viewBBox(lon, lat, h);
+  // Reload before any visible ground (+5%) leaves the loaded detail box; loads
+  // request a larger padded box so small pans and zoom-ins need no refetch.
+  const halfAngle = viewHalfAngle(FOVY, canvas.width / Math.max(canvas.height, 1));
+  const visible = viewBBox(lon, lat, h, halfAngle, 1.05);
   const moved =
     Number.isNaN(lastLoadLon) ||
     file !== lastLoadFile ||
-    Math.abs(Math.log(h) - Math.log(lastLoadH || h)) > 0.15 ||
     !loadedViewBBox ||
-    !bboxContains(loadedViewBBox, next, 0.25);
+    !bboxContains(loadedViewBBox, visible, 0);
   if (!moved && detailSlot.indexCount > 0) return;
 
   if (lon === lastQueuedLon && lat === lastQueuedLat && h === lastQueuedH) return;
@@ -556,13 +544,14 @@ function scheduleLandLoad(lon: number, lat: number, h: number) {
     lastLoadH = h;
     setLandProgress(0, "Starting…", true);
     landStatus = "loading…";
-    const result = await landLoader.loadView(lon, lat, h);
+    const result = await landLoader.loadView(lon, lat, h, halfAngle);
     if (landDisposed || lodFileFromHeight(height) === WORLD_FILE) return;
     if (!result || result.file !== file) return;
     setLandProgress(98, "Uploading GPU buffers…", true);
     uploadSlot(detailSlot, result.mesh);
     loadedViewBBox = result.bbox;
-    detailBBox = padClipBBox(result.bbox, 0.5);
+    // Base is hidden exactly where the detail data is complete (no overlap band).
+    detailBBox = result.bbox;
     lastLoadFile = result.file;
     landStatus = resultStatus("", result);
     setLandProgress(100, landStatus, true);

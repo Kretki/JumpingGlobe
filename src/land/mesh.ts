@@ -26,8 +26,12 @@ import {
 
 export type MeshBBox = { west: number; south: number; east: number; north: number };
 
-const MAX_RING_VERTS = 2000;
-const CLIP_PAD_DEG = 0.35;
+// Safety cap only: index-subsampling a ring distorts the coastline, so it must
+// never trigger for real data (earcut handles rings of this size fine).
+const MAX_RING_VERTS = 200_000;
+// Detail meshes overlap the base mesh's discard box by this much so no seam
+// pixels show at the boundary; the data itself only covers the requested bbox.
+const CLIP_PAD_DEG = 0.01;
 
 export type GeoJsonGeometry =
   | { type: "Polygon"; coordinates: number[][][] }
@@ -113,6 +117,35 @@ function uniqueVerts(ring: LonLat[]): LonLat[] {
   return out;
 }
 
+/**
+ * Drop vertices lying on the straight lon/lat segment between their neighbours
+ * (e.g. produced by ogr2ogr -segmentize). Lossless for the shape; the mesher
+ * re-densifies geodesically to the LOD budget, so these only cost earcut slivers.
+ */
+function dropCollinear(ring: LonLat[], tolDeg = 1e-7): LonLat[] {
+  if (ring.length < 4) return ring;
+  const out: LonLat[] = [ring[0]];
+  for (let i = 1; i < ring.length; i++) {
+    const c = ring[i];
+    while (out.length >= 2) {
+      const a = out[out.length - 2];
+      const b = out[out.length - 1];
+      const bx = bringLonNear(b[0], a[0]) - a[0];
+      const by = b[1] - a[1];
+      const cx = bringLonNear(c[0], a[0]) - a[0];
+      const cy = c[1] - a[1];
+      const len2 = cx * cx + cy * cy;
+      if (len2 < 1e-24) break;
+      const dot = bx * cx + by * cy;
+      const cross = bx * cy - by * cx;
+      if (dot > 0 && dot < len2 && cross * cross <= tolDeg * tolDeg * len2) out.pop();
+      else break;
+    }
+    out.push(c);
+  }
+  return out.length >= 3 ? out : ring;
+}
+
 function pointInRing2D(x: number, y: number, ring: [number, number][]): boolean {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -174,52 +207,12 @@ function isWorldMeshBBox(b: MeshBBox): boolean {
 }
 
 function rectInLonFrame(r: ClipRect, refLon: number): ClipRect {
+  // Full-longitude band (polar views): clip by latitude only, in any lon frame.
+  if (r.east - r.west >= 359.999) return { west: -1e9, south: r.south, east: 1e9, north: r.north };
   let west = bringLonNear(r.west, refLon);
   let east = bringLonNear(r.east, refLon);
   if (east < west) east += 360;
   return { west, south: r.south, east, north: r.north };
-}
-
-function clipPlane(
-  ring: LonLat[],
-  inside: (p: LonLat) => boolean,
-  intersect: (a: LonLat, b: LonLat) => LonLat
-): LonLat[] {
-  if (ring.length < 3) return [];
-  const out: LonLat[] = [];
-  const n = ring.length;
-  for (let i = 0; i < n; i++) {
-    const cur = ring[i];
-    const prev = ring[(i + n - 1) % n];
-    const curIn = inside(cur);
-    const prevIn = inside(prev);
-    if (curIn) {
-      if (!prevIn) out.push(intersect(prev, cur));
-      out.push(cur);
-    } else if (prevIn) {
-      out.push(intersect(prev, cur));
-    }
-  }
-  return uniqueVerts(out);
-}
-
-function clipRingToRect(ring: LonLat[], r: ClipRect): LonLat[] {
-  const dx = (a: LonLat, b: LonLat, x: number): LonLat => {
-    const d = b[0] - a[0];
-    const t = Math.abs(d) < 1e-18 ? 0 : (x - a[0]) / d;
-    return lerpLonLat(a, b, Math.max(0, Math.min(1, t)));
-  };
-  const dy = (a: LonLat, b: LonLat, y: number): LonLat => {
-    const d = b[1] - a[1];
-    const t = Math.abs(d) < 1e-18 ? 0 : (y - a[1]) / d;
-    return lerpLonLat(a, b, Math.max(0, Math.min(1, t)));
-  };
-  let p = ring;
-  p = clipPlane(p, (q) => q[0] >= r.west - 1e-12, (a, b) => dx(a, b, r.west));
-  p = clipPlane(p, (q) => q[0] <= r.east + 1e-12, (a, b) => dx(a, b, r.east));
-  p = clipPlane(p, (q) => q[1] >= r.south - 1e-12, (a, b) => dy(a, b, r.south));
-  p = clipPlane(p, (q) => q[1] <= r.north + 1e-12, (a, b) => dy(a, b, r.north));
-  return p;
 }
 
 function capRingVerts(ring: LonLat[], maxVerts: number): LonLat[] {
@@ -232,6 +225,251 @@ function capRingVerts(ring: LonLat[], maxVerts: number): LonLat[] {
   return uniqueVerts(out);
 }
 
+function ringSignedArea(ring: LonLat[]): number {
+  let a = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    a += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+  }
+  return a / 2;
+}
+
+/** Rect sides, numbered by their position on the CCW perimeter walk. */
+const SIDE_SOUTH = 0;
+const SIDE_EAST = 1;
+const SIDE_NORTH = 2;
+const SIDE_WEST = 3;
+
+type BoundaryHit = { pt: LonLat; s: number };
+type ClipChain = { pts: LonLat[]; entry: BoundaryHit; exit: BoundaryHit; used: boolean };
+
+/** CCW perimeter coordinate (from the SW corner) of a point on `side`. */
+function perimeterPos(p: LonLat, side: number, r: ClipRect): number {
+  const W = r.east - r.west;
+  const H = r.north - r.south;
+  const c = (v: number, hi: number) => Math.max(0, Math.min(hi, v));
+  if (side === SIDE_SOUTH) return c(p[0] - r.west, W);
+  if (side === SIDE_EAST) return W + c(p[1] - r.south, H);
+  if (side === SIDE_NORTH) return W + H + c(r.east - p[0], W);
+  return 2 * W + H + c(r.north - p[1], H);
+}
+
+/** Point at t on a→b, snapped exactly onto `side` so perimeter positions are exact. */
+function boundaryHit(a: LonLat, b: LonLat, t: number, side: number, r: ClipRect): BoundaryHit {
+  const pt = lerpLonLat(a, b, t);
+  if (side === SIDE_WEST) pt[0] = r.west;
+  else if (side === SIDE_EAST) pt[0] = r.east;
+  else if (side === SIDE_SOUTH) pt[1] = r.south;
+  else pt[1] = r.north;
+  return { pt, s: perimeterPos(pt, side, r) };
+}
+
+/**
+ * Liang–Barsky: parametric range [t0, t1] of segment a→b inside the rect (inclusive)
+ * plus the sides that bound it, or null when the segment misses the rect.
+ */
+function clipSegment(
+  a: LonLat,
+  b: LonLat,
+  r: ClipRect
+): { t0: number; t1: number; side0: number; side1: number } | null {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const p = [-dx, dx, -dy, dy];
+  const q = [a[0] - r.west, r.east - a[0], a[1] - r.south, r.north - a[1]];
+  const sides = [SIDE_WEST, SIDE_EAST, SIDE_SOUTH, SIDE_NORTH];
+  let t0 = 0;
+  let t1 = 1;
+  let side0 = -1;
+  let side1 = -1;
+  for (let k = 0; k < 4; k++) {
+    if (p[k] === 0) {
+      if (q[k] < 0) return null;
+      continue;
+    }
+    const t = q[k] / p[k];
+    if (p[k] < 0) {
+      if (t > t0) {
+        t0 = t;
+        side0 = sides[k];
+      }
+    } else if (t < t1) {
+      t1 = t;
+      side1 = sides[k];
+    }
+  }
+  if (t0 > t1) return null;
+  return { t0, t1, side0, side1 };
+}
+
+function insideRect(p: LonLat, r: ClipRect): boolean {
+  return p[0] >= r.west && p[0] <= r.east && p[1] >= r.south && p[1] <= r.north;
+}
+
+/**
+ * Cut a closed ring into the runs that lie inside the rect. Returns null when the
+ * whole ring is inside (keep it as-is) and [] when nothing of it is inside.
+ */
+function ringChains(ring: LonLat[], r: ClipRect): ClipChain[] | null {
+  const n = ring.length;
+  let start = -1;
+  for (let i = 0; i < n; i++) {
+    if (!insideRect(ring[i], r)) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return null;
+
+  const chains: ClipChain[] = [];
+  let cur: { pts: LonLat[]; entry: BoundaryHit } | null = null;
+  for (let k = 0; k < n; k++) {
+    const a = ring[(start + k) % n];
+    const b = ring[(start + k + 1) % n];
+    const seg = clipSegment(a, b, r);
+    if (!seg) continue;
+    if (seg.side0 >= 0 || !cur) {
+      // a is outside (or exactly on the boundary after an exit): the ring enters here.
+      const entry =
+        seg.side0 >= 0
+          ? boundaryHit(a, b, seg.t0, seg.side0, r)
+          : { pt: a, s: perimeterPos(a, nearestSide(a, r), r) };
+      cur = { pts: [entry.pt], entry };
+    }
+    if (seg.side1 >= 0) {
+      const exit = boundaryHit(a, b, seg.t1, seg.side1, r);
+      cur.pts.push(exit.pt);
+      const pts = uniqueVerts(cur.pts);
+      // Runs that only touch the boundary at a point enclose nothing.
+      if (pts.length >= 2) chains.push({ pts, entry: cur.entry, exit, used: false });
+      cur = null;
+    } else {
+      cur.pts.push(b);
+    }
+  }
+  return chains;
+}
+
+function nearestSide(p: LonLat, r: ClipRect): number {
+  const d = [p[1] - r.south, r.east - p[0], r.north - p[1], p[0] - r.west];
+  let best = 0;
+  for (let k = 1; k < 4; k++) if (d[k] < d[best]) best = k;
+  return best;
+}
+
+/**
+ * Exact polygon ∩ rect (Weiler–Atherton specialised to an axis-aligned rect).
+ *
+ * Sutherland–Hodgman returns ONE ring per input ring: separate pieces of land stay
+ * linked by zero-width "bridge" edges along the rect border, and earcut fills the
+ * water between them. Here every inside run of the exterior/holes is cut out and
+ * runs are re-joined only by walking the rect border CCW from an exit to the next
+ * entry, so each disjoint piece becomes its own polygon.
+ */
+function clipPolygonToRect(
+  exteriorIn: LonLat[],
+  holesIn: LonLat[][],
+  r: ClipRect
+): { exterior: LonLat[]; holes: LonLat[][] }[] {
+  // Exterior CCW / holes CW: land is always on the left of travel, so the border
+  // walk from an exit to the next entry is CCW.
+  const exterior = ringSignedArea(exteriorIn) < 0 ? exteriorIn.slice().reverse() : exteriorIn;
+  const holes = holesIn
+    .filter((h) => h.length >= 3)
+    .map((h) => (ringSignedArea(h) > 0 ? h.slice().reverse() : h));
+
+  const chains: ClipChain[] = [];
+  const insideHoles: LonLat[][] = [];
+  const crossingOrOutsideHoles: LonLat[][] = [];
+
+  const extChains = ringChains(exterior, r);
+  if (extChains === null) {
+    // Exterior fully inside ⇒ its holes are too.
+    return [{ exterior, holes }];
+  }
+  chains.push(...extChains);
+  for (const h of holes) {
+    const hc = ringChains(h, r);
+    if (hc === null) insideHoles.push(h);
+    else {
+      chains.push(...hc);
+      crossingOrOutsideHoles.push(h);
+    }
+  }
+
+  const rectRing = (): LonLat[] => [
+    [r.west, r.south],
+    [r.east, r.south],
+    [r.east, r.north],
+    [r.west, r.north],
+  ];
+
+  const exteriors: LonLat[][] = [];
+  if (!chains.length) {
+    // No boundary crossings: the rect is either entirely land or entirely water.
+    const cx = (r.west + r.east) / 2;
+    const cy = (r.south + r.north) / 2;
+    if (!pointInRing2D(cx, cy, exterior as [number, number][])) return [];
+    for (const h of crossingOrOutsideHoles) {
+      if (pointInRing2D(cx, cy, h as [number, number][])) return [];
+    }
+    exteriors.push(rectRing());
+  } else {
+    const W = r.east - r.west;
+    const H = r.north - r.south;
+    const P = 2 * W + 2 * H;
+    const corners: { s: number; pt: LonLat }[] = [
+      { s: W, pt: [r.east, r.south] },
+      { s: W + H, pt: [r.east, r.north] },
+      { s: 2 * W + H, pt: [r.west, r.north] },
+      { s: P, pt: [r.west, r.south] },
+    ];
+    const ccw = (from: number, to: number) => {
+      const d = (to - from) % P;
+      return d < 0 ? d + P : d;
+    };
+    const nextChain = (from: number): ClipChain => {
+      let best = chains[0];
+      let bestD = Infinity;
+      for (const c of chains) {
+        const d = ccw(from, c.entry.s);
+        if (d < bestD) {
+          bestD = d;
+          best = c;
+        }
+      }
+      return best;
+    };
+
+    for (const first of chains) {
+      if (first.used) continue;
+      const ring: LonLat[] = [];
+      let cur = first;
+      for (let guard = 0; guard <= chains.length; guard++) {
+        cur.used = true;
+        for (const p of cur.pts) ring.push(p);
+        const next = nextChain(cur.exit.s);
+        const span = ccw(cur.exit.s, next.entry.s);
+        const passed = corners
+          .map((c) => ({ d: ccw(cur.exit.s, c.s), pt: c.pt }))
+          .filter((c) => c.d > 0 && c.d < span)
+          .sort((a, b) => a.d - b.d);
+        for (const c of passed) ring.push([c.pt[0], c.pt[1]]);
+        if (next === first || next.used) break;
+        cur = next;
+      }
+      const clean = uniqueVerts(ring);
+      if (clean.length >= 3 && ringSignedArea(clean) > 0) exteriors.push(clean);
+    }
+  }
+
+  const out = exteriors.map((e) => ({ exterior: e, holes: [] as LonLat[][] }));
+  for (const h of insideHoles) {
+    const owner = out.find((o) => pointInRing2D(h[0][0], h[0][1], o.exterior as [number, number][]));
+    if (owner) owner.holes.push(h);
+  }
+  return out;
+}
+
 function clipPreparedPiece(
   piece: { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind },
   bbox: MeshBBox
@@ -239,45 +477,26 @@ function clipPreparedPiece(
   const ref = piece.exterior[0][0];
   const out: { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind }[] = [];
   for (const raw of splitBBox(bbox)) {
-    const r = rectInLonFrame(raw, ref);
-    let ext = clipRingToRect(piece.exterior, r);
-    if (ext.length < 3) {
-      const cx = (r.west + r.east) / 2;
-      const cy = (r.south + r.north) / 2;
-      if (pointInRing2D(cx, cy, piece.exterior as [number, number][])) {
-        ext = [
-          [r.west, r.south],
-          [r.east, r.south],
-          [r.east, r.north],
-          [r.west, r.north],
-        ];
-      } else {
-        continue;
+    let r = rectInLonFrame(raw, ref);
+    if (r.east - r.west > 720) {
+      // Full-longitude band: clip by latitude only, with a finite rect around the ring.
+      let minL = Infinity;
+      let maxL = -Infinity;
+      for (const p of piece.exterior) {
+        minL = Math.min(minL, p[0]);
+        maxL = Math.max(maxL, p[0]);
       }
+      r = { west: minL - 1, south: r.south, east: maxL + 1, north: r.north };
     }
-    let skip = false;
-    const holes: LonLat[][] = [];
-    for (const h of piece.holes) {
-      let ch = clipRingToRect(h, r);
-      if (ch.length < 3) {
-        const cx = (r.west + r.east) / 2;
-        const cy = (r.south + r.north) / 2;
-        if (pointInRing2D(cx, cy, h as [number, number][])) {
-          skip = true;
-          break;
-        }
-        continue;
-      }
-      holes.push(capRingVerts(ch, MAX_RING_VERTS));
+    for (const part of clipPolygonToRect(piece.exterior, piece.holes, r)) {
+      const exterior = capRingVerts(part.exterior, MAX_RING_VERTS);
+      if (exterior.length < 3) continue;
+      out.push({
+        exterior,
+        holes: part.holes.map((h) => capRingVerts(h, MAX_RING_VERTS)),
+        pole: ringEnclosesPole(exterior),
+      });
     }
-    if (skip) continue;
-    const capped = capRingVerts(ext, MAX_RING_VERTS);
-    if (capped.length < 3) continue;
-    out.push({
-      exterior: capped,
-      holes,
-      pole: ringEnclosesPole(capped),
-    });
   }
   return out;
 }
@@ -288,7 +507,7 @@ function preparePolygonPieces(
   stats: MeshStats
 ): { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind }[] {
   if (!rings.length) return [];
-  const exteriorIn = stripClosingVertex(rings[0]);
+  const exteriorIn = dropCollinear(stripClosingVertex(rings[0]));
   if (exteriorIn.length < 3) {
     stats.skippedDegenerate++;
     note(stats, "degenerate_ring");
@@ -313,7 +532,9 @@ function preparePolygonPieces(
     }
   }
 
-  const holeInputs = rings.slice(1).map((r) => unwrapRingLons(stripClosingVertex(r)));
+  const holeInputs = rings
+    .slice(1)
+    .map((r) => unwrapRingLons(dropCollinear(stripClosingVertex(r))));
 
   const pieces: { exterior: LonLat[]; holes: LonLat[][]; pole: PoleKind }[] = [];
   for (const ext of exteriors) {
@@ -607,10 +828,16 @@ export function splitLongEdges(
   maxIter = 24
 ): { maxEdge: number } {
   const budget = maxEdgeM * 1.02;
-  const edgeKey = (i: number, j: number) => (i < j ? i + "," + j : j + "," + i);
+  // Numeric key (vertex indices stay far below 2^26 per piece) — much cheaper than strings.
+  const edgeKey = (i: number, j: number) => (i < j ? i * 67108864 + j : j * 67108864 + i);
+
+  // Triangles under budget never change again (their vertices are fixed), so move
+  // them out once instead of re-measuring them on every pass.
+  const done: number[] = [];
+  let active = indices.slice();
 
   for (let pass = 0; pass < maxIter; pass++) {
-    const midCache = new Map<string, number>();
+    const midCache = new Map<number, number>();
     const getMid = (i: number, j: number): number => {
       const key = edgeKey(i, j);
       const hit = midCache.get(key);
@@ -625,20 +852,18 @@ export function splitLongEdges(
     };
 
     const nxt: number[] = [];
-    let any = false;
-    for (let t = 0; t < indices.length; t += 3) {
-      const a = indices[t];
-      const b = indices[t + 1];
-      const c = indices[t + 2];
+    for (let t = 0; t < active.length; t += 3) {
+      const a = active[t];
+      const b = active[t + 1];
+      const c = active[t + 2];
       const lab = edgeLen(positions, a, b);
       const lbc = edgeLen(positions, b, c);
       const lca = edgeLen(positions, c, a);
       const longest = Math.max(lab, lbc, lca);
       if (longest <= budget) {
-        pushOutward(nxt, positions, a, b, c);
+        pushOutward(done, positions, a, b, c);
         continue;
       }
-      any = true;
       if (lab >= lbc && lab >= lca) {
         const m = getMid(a, b);
         pushOutward(nxt, positions, a, m, c);
@@ -653,10 +878,14 @@ export function splitLongEdges(
         pushOutward(nxt, positions, b, c, m);
       }
     }
-    indices.length = 0;
-    for (let i = 0; i < nxt.length; i++) indices.push(nxt[i]);
-    if (!any) break;
+    active = nxt;
+    if (!active.length) break;
   }
+
+  // Leftovers when maxIter is exhausted keep their (over-budget) edges.
+  indices.length = 0;
+  for (let i = 0; i < done.length; i++) indices.push(done[i]);
+  for (let i = 0; i < active.length; i++) indices.push(active[i]);
 
   let maxEdge = 0;
   for (let t = 0; t < indices.length; t += 3) {
@@ -668,6 +897,15 @@ export function splitLongEdges(
     );
   }
   return { maxEdge };
+}
+
+/**
+ * Flat triangles with edges ≤ edgeM sag below the ellipsoid by at most ~L²/(6R)
+ * (circumradius of an equilateral triangle). Lift coarse LODs by that sag so they
+ * never dip into the ocean, which lets world-scale LODs use much larger triangles.
+ */
+function landHeightForEdgeM(edgeM: number): number {
+  return LAND_HEIGHT_M + (edgeM * edgeM) / (6 * WGS84_A);
 }
 
 function appendPiece(
@@ -682,6 +920,7 @@ function appendPiece(
 ): number {
   const boundaryMax = maxBoundaryEdgeMFromOrderNum(lod);
   const edgeMax = maxEdgeMFromOrderNum(lod);
+  const landH = landHeightForEdgeM(Math.max(edgeMax, boundaryMax));
   const result = triangulatePiece(exterior, holes, pole, boundaryMax, stats);
   if (!result) return 0;
 
@@ -691,7 +930,7 @@ function appendPiece(
 
   for (const [lon, lat] of baseLonLat) {
     const ll = normalizeLonLat([lon, lat]);
-    const [x, y, z] = lonLatToEcef(ll[0], ll[1], LAND_HEIGHT_M);
+    const [x, y, z] = lonLatToEcef(ll[0], ll[1], landH);
     localPos.push(x, y, z);
   }
   for (let i = 0; i < result.tri.length; i += 3) {
@@ -704,7 +943,7 @@ function appendPiece(
     localIdx.push(a, b, c);
   }
 
-  const { maxEdge } = splitLongEdges(localPos, localIdx, edgeMax, LAND_HEIGHT_M);
+  const { maxEdge } = splitLongEdges(localPos, localIdx, edgeMax, landH);
   stats.maxEdgeMObserved = Math.max(stats.maxEdgeMObserved, maxEdge);
   if (maxEdge > edgeMax * 1.05) note(stats, "undercut");
 

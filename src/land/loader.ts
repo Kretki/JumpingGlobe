@@ -7,7 +7,6 @@ import {
   WORLD_FILE,
   featureLimitFromHeight,
   lodFileFromHeight,
-  maxSpanFromHeight,
   meshLodFromFile,
   minAreaFromHeight,
   type LandLod,
@@ -17,7 +16,6 @@ export {
   featureLimitFromHeight,
   lodFileFromHeight,
   lodFromHeight,
-  maxSpanFromHeight,
   meshLodFromFile,
   meshLodFromHeight,
   minAreaFromHeight,
@@ -51,24 +49,52 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/** Default angle (rad) between the view axis and a screen corner: 45° FOV, 16:9. */
+export const DEFAULT_VIEW_HALF_ANGLE = Math.atan(Math.tan(Math.PI / 8) * Math.hypot(1, 16 / 9));
+
+/** Angle (rad) between the view axis and the screen corner for a vertical FOV and aspect. */
+export function viewHalfAngle(fovyRad: number, aspect: number): number {
+  return Math.atan(Math.tan(fovyRad / 2) * Math.hypot(1, aspect));
+}
+
+/**
+ * Angular radius (deg, great-circle from the nadir point) of the ground visible
+ * from `heightM` looking straight down, where screen corners are `halfAngleRad`
+ * off-axis. Falls back to the horizon when the corner rays miss the globe.
+ */
+export function visibleGroundRadiusDeg(heightM: number, halfAngleRad: number): number {
+  const R = 6_356_752; // polar radius: smallest R gives the largest (safe) footprint
+  const r = R + Math.max(heightM, 1);
+  const k = (r / R) * Math.sin(halfAngleRad);
+  const rad = k >= 1 ? Math.acos(R / r) : Math.asin(k) - halfAngleRad;
+  return (rad * 180) / Math.PI;
+}
+
+/**
+ * Lon/lat box enclosing the visible ground cap (radius × padScale) around the
+ * nadir point. The box always covers the whole screen, so detail meshes never
+ * end inside the viewport.
+ */
 export function viewBBox(
   lonDeg: number,
   latDeg: number,
   heightM: number,
-  padScale = 1.35,
-  maxSpanDeg = maxSpanFromHeight(heightM)
+  halfAngleRad = DEFAULT_VIEW_HALF_ANGLE,
+  padScale = 1.25
 ): BBox {
-  const R = 6_371_000;
-  const ang = Math.acos(clamp(R / (R + Math.max(heightM, 1)), -1, 1));
-  const maxHalf = maxSpanDeg / 2;
-  let halfLon = ((ang * 180) / Math.PI) * padScale;
-  let halfLat = halfLon * padScale;
-  const cosLat = Math.max(0.15, Math.cos((latDeg * Math.PI) / 180));
-  halfLon = Math.min(maxHalf, halfLon / cosLat);
-  halfLat = Math.min(maxHalf, halfLat);
+  const capDeg = Math.min(90, visibleGroundRadiusDeg(heightM, halfAngleRad) * padScale + 0.01);
+  let south = clamp(latDeg - capDeg, -85, 85);
+  let north = clamp(latDeg + capDeg, -85, 85);
 
-  let south = clamp(latDeg - halfLat, -85, 85);
-  let north = clamp(latDeg + halfLat, -85, 85);
+  // Cap touches a pole (or the ±85° data limit): it spans every longitude.
+  const cosLat = Math.cos((latDeg * Math.PI) / 180);
+  const sinCap = Math.sin((capDeg * Math.PI) / 180);
+  if (latDeg + capDeg >= 85 || latDeg - capDeg <= -85 || sinCap >= cosLat) {
+    return { west: -180, south, east: 180, north };
+  }
+  const halfLon = (Math.asin(sinCap / cosLat) * 180) / Math.PI;
+  if (halfLon >= 179.5) return { west: -180, south, east: 180, north };
+
   let west = lonDeg - halfLon;
   let east = lonDeg + halfLon;
 
@@ -336,11 +362,16 @@ export class LandLoader {
     });
   }
 
-  async loadView(lonDeg: number, latDeg: number, heightM: number): Promise<LandLoadResult | null> {
+  async loadView(
+    lonDeg: number,
+    latDeg: number,
+    heightM: number,
+    halfAngleRad = DEFAULT_VIEW_HALF_ANGLE
+  ): Promise<LandLoadResult | null> {
     if (this.disposed) return null;
     const file = lodFileFromHeight(heightM);
     if (file === WORLD_FILE) return this.worldResult;
-    const bbox = viewBBox(lonDeg, latDeg, heightM);
+    const bbox = viewBBox(lonDeg, latDeg, heightM, halfAngleRad);
     const minArea = minAreaFromHeight(heightM);
     const limit = featureLimitFromHeight(heightM);
     const key = bboxKey(bbox, file, minArea);

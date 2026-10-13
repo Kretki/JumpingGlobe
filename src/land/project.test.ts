@@ -180,4 +180,40 @@ function assert(cond: boolean, msg: string) {
   assert(bad === 0, "no Antarctica triangles near/north of equator");
 }
 
+// Clipping must not bridge separate pieces: a comb whose teeth are joined outside
+// the view bbox (plus a lake crossing the bbox edge) must leave the gaps uncovered.
+{
+  const comb = [
+    [0, 0], [6, 0], [6, 1], [1, 1], [1, 2], [6, 2], [6, 3], [1, 3], [1, 4], [6, 4], [6, 5], [0, 5], [0, 0],
+  ];
+  const lake = [[2.5, 4.2], [4, 4.2], [4, 4.8], [2.5, 4.8], [2.5, 4.2]];
+  const bbox = { west: 3, south: -1, east: 8, north: 6 };
+  const covered = (mesh: ReturnType<typeof featureCollectionToMesh>, lon: number, lat: number) => {
+    const p = mesh.positions;
+    const ll = (i: number) => ecefToLonLat(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+    const cross = (a: number[], b: number[]) => (b[0] - a[0]) * (lat - a[1]) - (b[1] - a[1]) * (lon - a[0]);
+    for (let t = 0; t < mesh.indices.length; t += 3) {
+      const a = ll(mesh.indices[t]);
+      const b = ll(mesh.indices[t + 1]);
+      const c = ll(mesh.indices[t + 2]);
+      const d1 = cross(a, b);
+      const d2 = cross(b, c);
+      const d3 = cross(c, a);
+      if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) return true;
+    }
+    return false;
+  };
+  for (const [name, ext] of [["ccw", comb], ["cw", [...comb].reverse()]] as const) {
+    const fc: GeoJsonFeatureCollection = {
+      type: "FeatureCollection",
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [ext as number[][], lake] } }],
+    };
+    const mesh = featureCollectionToMesh(fc, 5, undefined, { bbox, heightM: 50_000 });
+    assert(covered(mesh, 4.5, 0.5) && covered(mesh, 4.5, 2.5) && covered(mesh, 4.5, 4.1), `${name}: comb teeth are land`);
+    assert(!covered(mesh, 4.5, 1.5) && !covered(mesh, 4.5, 3.5), `${name}: water between clipped teeth stays open`);
+    assert(!covered(mesh, 3.5, 4.5), `${name}: lake crossing the bbox edge stays open`);
+    assert(!covered(mesh, 7, 2.5), `${name}: nothing east of the land`);
+  }
+}
+
 console.log("\nAll project/mesh self-checks passed.");
