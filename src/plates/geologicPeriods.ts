@@ -1,4 +1,4 @@
-/** ICS geologic periods within the rotation model's range. */
+/** ICS geologic periods within the rotation model's range (Cao et al. 2024 reaches 1.8 Ga). */
 
 /** [older bound Ma, period name], youngest first. */
 const PERIOD_BOUNDS: [number, string][] = [
@@ -18,6 +18,10 @@ const PERIOD_BOUNDS: [number, string][] = [
   [720, "Cryogenian"],
   [1000, "Tonian"],
   [1200, "Stenian"],
+  [1400, "Ectasian"],
+  [1600, "Calymmian"],
+  [1800, "Statherian"],
+  [2050, "Orosirian"],
 ];
 
 /**

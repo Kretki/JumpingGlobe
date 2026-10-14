@@ -1,156 +1,30 @@
-"""Cached, JSON-encoded responses for land queries and the rotation model."""
+"""Cached, JSON-encoded responses for land queries (the rotation model is served by server/rotation_service.py)."""
 
 from __future__ import annotations
 
-import json
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from server.gpkg_store import GeoPackageStore
+from server.json_encoding import encode_compact_json
 from server.land_queries import LandQueryEngine
-from server.rotation_parser import parse_rotation_file
-from server.rotation_tree import RotationTree
+from server.service_contracts import RotationTreeSource
 from server.spherical_geometry import BoundingBox
 
 LAND_CACHE_SIZE = 32
 PAST_CACHE_SIZE = 16
 
 
-def encode_compact_json(json_payload: Any) -> bytes:
-    """Serialise a json_payload as compact UTF-8 JSON.
-
-    Usage:
-        Encode every API body once so cached responses skip re-encoding.
-
-    Args:
-        json_payload: JSON-serialisable object.
-
-    Returns:
-        UTF-8 bytes without insignificant whitespace.
-    """
-    return json.dumps(json_payload, separators=(",", ":")).encode("utf-8")
-
-
-class RotationService:
-    """Loads the .rot file and caches its JSON encoding and RotationTree per file version."""
-
-    def __init__(self, rotation_path: Path) -> None:
-        """Create the service.
-
-        Usage:
-            ``RotationService(ROTATION_FILE)``.
-
-        Args:
-            rotation_path: Path of the GPlates .rot file.
-
-        Returns:
-            None.
-        """
-        self._rotation_path = rotation_path
-        self._json_by_mtime = lru_cache(maxsize=1)(self._encode_rotations)
-        self._tree_by_mtime = lru_cache(maxsize=1)(self._build_tree)
-
-    def is_available(self) -> bool:
-        """Tell whether the rotation file exists.
-
-        Usage:
-            Routes answer 404 when it is missing.
-
-        Returns:
-            True when the file is present.
-        """
-        return self._rotation_path.is_file()
-
-    def file_name(self) -> str:
-        """Return the rotation file's base name.
-
-        Usage:
-            Error messages that must not reveal server paths.
-
-        Returns:
-            File name without directories.
-        """
-        return self._rotation_path.name
-
-    def _modified_ns(self) -> int:
-        """Return the rotation file's modification time.
-
-        Usage:
-            Cache key, so caches refresh when the file changes.
-
-        Returns:
-            ``st_mtime_ns`` of the rotation file.
-        """
-        return self._rotation_path.stat().st_mtime_ns
-
-    def _encode_rotations(self, _modified_ns: int) -> bytes:
-        """Parse and encode the rotation model (anchor plate 0).
-
-        Usage:
-            Cache-miss path of rotations_json.
-
-        Args:
-            _modified_ns: File version; only used as the cache key.
-
-        Returns:
-            Encoded ``{"maxAge", "plates", "anchorPlate"}``.
-        """
-        rotation_model = parse_rotation_file(self._rotation_path)
-        rotation_model["anchorPlate"] = 0
-        return encode_compact_json(rotation_model)
-
-    def _build_tree(self, _modified_ns: int) -> RotationTree:
-        """Parse the rotation file into a RotationTree.
-
-        Usage:
-            Cache-miss path of rotation_tree.
-
-        Args:
-            _modified_ns: File version; only used as the cache key.
-
-        Returns:
-            The rotation tree.
-        """
-        return RotationTree(parse_rotation_file(self._rotation_path))
-
-    def rotations_json(self) -> bytes:
-        """Return the encoded rotation model for the current file version.
-
-        Usage:
-            Body of /api/rotations.
-
-        Returns:
-            UTF-8 JSON bytes.
-
-        Raises:
-            OSError: If the file cannot be read.
-        """
-        return self._json_by_mtime(self._modified_ns())
-
-    def rotation_tree(self) -> RotationTree:
-        """Return the RotationTree for the current file version.
-
-        Usage:
-            Rotation source for past-age land queries.
-
-        Returns:
-            The cached tree.
-
-        Raises:
-            OSError: If the file cannot be read.
-        """
-        return self._tree_by_mtime(self._modified_ns())
-
-
 class LandService:
     """Runs land queries and caches their encoded responses."""
 
-    def __init__(self, gpkg_store: GeoPackageStore, query_engine: LandQueryEngine, rotations: RotationService) -> None:
+    def __init__(
+        self, gpkg_store: GeoPackageStore, query_engine: LandQueryEngine, rotations: RotationTreeSource
+    ) -> None:
         """Create the service.
 
         Usage:
-            ``LandService(store, LandQueryEngine(store), RotationService(path))``.
+            ``LandService(store, LandQueryEngine(store), RotationService(paths, max_age))``.
 
         Args:
             gpkg_store: GeoPackage store (file validation, stats).

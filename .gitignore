@@ -73,6 +73,7 @@ temp/
 
 #External heavy data
 public/data/lods*
+public/external
 
 #Python runtime files
 *.pyc

@@ -30,9 +30,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 from server.api_routes import RouteDependencies, build_api_router
 from server.gpkg_store import GeoPackageStore
 from server.land_queries import LandQueryEngine
-from server.lod_config import DATA_DIR, FULL_RESOLUTION_FILE, PROJECT_ROOT, ROTATION_FILE, WORLD_FILE
-from server.plate_layers import PlateLayerBuilder, default_plate_layer_paths
-from server.response_services import LandService, RotationService
+from server.lod_config import DATA_DIR, FULL_RESOLUTION_FILE, PROJECT_ROOT, WORLD_FILE
+from server.plate_layer_paths import default_plate_layer_paths
+from server.plate_layers import PlateLayerBuilder
+from server.plate_model_config import PLATE_MODEL
+from server.response_services import LandService
+from server.rotation_service import RotationService
 
 DEFAULT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 DEFAULT_BIND_HOST = "127.0.0.1"
@@ -82,7 +85,7 @@ def create_application() -> FastAPI:
         The configured FastAPI application.
     """
     gpkg_store = GeoPackageStore(DATA_DIR, FULL_RESOLUTION_FILE)
-    rotation_service = RotationService(ROTATION_FILE)
+    rotation_service = RotationService(PLATE_MODEL.rotation_files, PLATE_MODEL.max_age_ma)
     land_service = LandService(gpkg_store, LandQueryEngine(gpkg_store), rotation_service)
     plate_builder = PlateLayerBuilder(default_plate_layer_paths(), on_rebuilt=land_service.clear_caches)
 

@@ -12,9 +12,10 @@
 # Outputs (in dest_dir):
 #   land_lod0.gpkg … land_lod5.gpkg   EPSG:4326, layer land_polygons, R-tree index,
 #                                     simplified in metres (EPSG:4087) per LOD
-#   <lod>_plates.gpkg, merdith_static.gpkg
-#                                     plate-tagged twins via merdith_prep.sh, when
-#                                     the Merdith rotation files are present
+#   <lod>_cao_plates.gpkg, cao_static.gpkg, cao_plate_outlines.gpkg
+#                                     plate layers via public/external/cao_prep.sh,
+#                                     when the Cao et al. 2024 model files are present
+#                                     in public/external/cao_rot
 #
 # Needs: unzip, ogr2ogr (gdal-bin), awk. Temporary files live in dest_dir/.lod_work
 # and are removed at the end.
@@ -99,11 +100,13 @@ printf 'Removing unnecessary data\n'
 rm -rf -- "${work_dir:?}" "${dest_dir:?}/${archive_name:?}"
 
 # Plate reconstruction: plate-tagged copies of the fresh LODs (no-op without the
-# Merdith files). The API server would also rebuild them on its next start.
+# Cao model files). The API server would also rebuild them on its next start.
+# The tag and file names must match the plateModel section of lod.json.
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-merdith_dir="${script_dir}/meredith_rot"
-if [ -f "${merdith_dir}/meredith.rot" ]; then
-  printf 'Plate-tagging LODs (merdith_prep.sh)\n'
-  "${script_dir}/merdith_prep.sh" "$dest_dir" "$merdith_dir" \
+external_dir="$(cd -- "${script_dir}/../external" && pwd)"
+static_source="${external_dir}/cao_rot/static_polygons.gpmlz"
+if [ -f "$static_source" ]; then
+  printf 'Plate-tagging LODs (cao_prep.sh)\n'
+  "${external_dir}/cao_prep.sh" "$dest_dir" "$static_source" cao \
     land_lod0.gpkg land_lod1.gpkg land_lod2.gpkg land_lod3.gpkg land_lod4.gpkg land_lod5.gpkg
 fi

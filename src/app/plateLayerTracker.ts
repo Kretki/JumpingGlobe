@@ -24,6 +24,8 @@ export class PlateLayerTracker {
   /** LOD file → plate-tagged twin, for twins the server has finished. */
   plateFiles: Record<string, string> = {};
   staticFile: string | null = null;
+  /** Plate-outline file once the server has built it. */
+  outlinesFile: string | null = null;
 
   /**
    * Create the tracker.
@@ -74,6 +76,7 @@ export class PlateLayerTracker {
         this.statusDetail = statusResponse.detail;
         this.plateFiles = statusResponse.plateFiles;
         this.staticFile = statusResponse.staticFile;
+        this.outlinesFile = statusResponse.outlinesFile;
       } catch (caughtError) {
         this.buildStatus = "failed";
         this.statusDetail = String(caughtError);

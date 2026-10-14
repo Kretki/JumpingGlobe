@@ -182,6 +182,32 @@
         border: 1px solid rgba(154, 164, 178, 0.3);
         border-radius: 4px;
       }
+      #tl-options label:has(input:disabled) {
+        opacity: 0.5;
+      }
+      #plate-labels {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+        user-select: none;
+      }
+      #plate-labels[hidden] {
+        display: none;
+      }
+      #plate-labels .plate-label {
+        position: absolute;
+        left: 0;
+        top: 0;
+        white-space: nowrap;
+        color: #f4f6fb;
+        font: 600 11px/1.3 system-ui, sans-serif;
+        letter-spacing: 0.02em;
+        text-shadow: 0 0 3px #0b0f14, 0 0 6px rgba(11, 15, 20, 0.85);
+      }
+      #plate-labels .plate-label[hidden] {
+        display: none;
+      }
       #tl-status {
         margin-left: auto;
         color: #e0b872;
@@ -257,6 +283,7 @@
   </head>
   <body>
     <canvas id="gl"></canvas>
+    <div id="plate-labels" aria-hidden="true" hidden></div>
     <div id="coords"></div>
     <div id="land-progress" aria-live="polite">
       <div class="title">
@@ -268,9 +295,9 @@
     </div>
     <div id="timeline" aria-label="Plate reconstruction timeline">
       <button id="tl-play" type="button" disabled>▶ Play</button>
-      <input id="tl-age" type="range" min="0" max="1140" step="1" value="1140" disabled aria-label="Timeline from the past (left) to the present (right)" />
+      <input id="tl-age" type="range" min="0" max="1800" step="1" value="1800" disabled aria-label="Timeline from the past (left) to the present (right)" />
       <output id="tl-readout" for="tl-age">0 Ma</output>
-      <div id="tl-scale"><span id="tl-start">1140 Ma</span><span id="tl-end">Present</span></div>
+      <div id="tl-scale"><span id="tl-start">1800 Ma</span><span id="tl-end">Present</span></div>
       <div id="tl-options">
         <label>Speed
           <select id="tl-speed">
@@ -281,6 +308,8 @@
           </select>
         </label>
         <label title="Run the timeline from the present into the past"><input id="tl-reverse" type="checkbox" /> Present → past</label>
+        <label title="Draw the lithospheric plate boundaries as a wireframe that moves with the plates"><input id="pl-outlines" type="checkbox" /> Plate outlines</label>
+        <label title="Write the plate names on the outlined plates"><input id="pl-names" type="checkbox" checked disabled /> Plate names</label>
         <span id="tl-status" aria-live="polite">Loading rotation model…</span>
       </div>
     </div>

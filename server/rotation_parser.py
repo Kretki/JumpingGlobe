@@ -1,7 +1,8 @@
-"""Parse a GPlates .rot file into the compact rotation model the client reconstructs from."""
+"""Parse GPlates .rot files into the compact rotation model the client reconstructs from."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -11,13 +12,14 @@ _MIN_POLE_FIELDS = 6
 
 PoleRecord = list[float]
 """[age Ma, pole latitude, pole longitude, angle deg, fixed plate id]."""
+PlatePoles = dict[str, list[PoleRecord]]
 
 
 def parse_pole_line(text_line: str) -> tuple[int, PoleRecord] | None:
     """Parse one line of a .rot file.
 
     Usage:
-        Called for every line by parse_rotation_file; text after ``!`` is a comment.
+        Called for every line by read_rotation_file; text after ``!`` is a comment.
 
     Args:
         text_line: Raw line of the rotation file.
@@ -40,25 +42,22 @@ def parse_pole_line(text_line: str) -> tuple[int, PoleRecord] | None:
     return moving_plate, [pole_age, pole_latitude, pole_longitude, angle_deg, fixed_plate]
 
 
-def parse_rotation_file(rotation_path: Path) -> dict[str, Any]:
-    """Read a GPlates rotation file into ``{"maxAge", "plates"}``.
+def read_rotation_file(rotation_path: Path, plate_poles: PlatePoles) -> float:
+    """Append the poles of one .rot file to a per-plate pole table.
 
     Usage:
-        Build the model served by /api/rotations and used by RotationTree. Poles
-        keep file order per moving plate, so consecutive rows with the same fixed
-        plate form one interpolation sequence and fixed-plate switches
-        (crossovers) stay where the file puts them.
+        Called once per file by parse_rotation_files, in load order.
 
     Args:
         rotation_path: Path of the .rot file.
+        plate_poles: Table ``moving_id_str -> rows`` extended in place.
 
     Returns:
-        ``{"maxAge": float, "plates": {moving_id_str: [[age, lat, lon, angle, fixed_id], ...]}}``.
+        Oldest pole age found in this file, in Ma (0.0 for an empty file).
 
     Raises:
         OSError: If the file cannot be read.
     """
-    plate_poles: dict[str, list[PoleRecord]] = {}
     oldest_age = 0.0
     with open(rotation_path, encoding="utf-8", errors="replace") as rotation_file:
         for text_line in rotation_file:
@@ -68,4 +67,31 @@ def parse_rotation_file(rotation_path: Path) -> dict[str, Any]:
             moving_plate, pole_row = parsed_pole
             plate_poles.setdefault(str(moving_plate), []).append(pole_row)
             oldest_age = max(oldest_age, pole_row[0])
+    return oldest_age
+
+
+def parse_rotation_files(rotation_paths: Sequence[Path]) -> dict[str, Any]:
+    """Read one or more GPlates rotation files into ``{"maxAge", "plates"}``.
+
+    Usage:
+        Build the model served by /api/rotations and used by RotationTree. Models
+        split over several files (Cao et al. 2024: 0-1000 Ma and 1000-1800 Ma) are
+        concatenated per moving plate in file order; RotationTree starts a new
+        interpolation sequence wherever the fixed plate changes or the age goes
+        back, so each file's sequences stay separate and earlier files win where
+        their age ranges overlap.
+
+    Args:
+        rotation_paths: .rot files in load order.
+
+    Returns:
+        ``{"maxAge": float, "plates": {moving_id_str: [[age, lat, lon, angle, fixed_id], ...]}}``.
+
+    Raises:
+        OSError: If a file cannot be read.
+    """
+    plate_poles: PlatePoles = {}
+    oldest_age = 0.0
+    for rotation_path in rotation_paths:
+        oldest_age = max(oldest_age, read_rotation_file(rotation_path, plate_poles))
     return {"maxAge": oldest_age, "plates": plate_poles}

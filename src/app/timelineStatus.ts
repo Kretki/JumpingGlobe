@@ -1,6 +1,9 @@
 /** Status line under the timeline: why plates or detail are not shown. */
 
+import lodSettings from "../../lod.json";
 import { lodFileFromHeight, WORLD_FILE } from "../land/lod.config";
+
+const PREP_LOG_PATH = `${lodSettings.dataDir}/${lodSettings.plateModel.tag}_prep.log`;
 
 export type TimelineStatusInput = {
   rotationModelError: boolean;
@@ -8,6 +11,8 @@ export type TimelineStatusInput = {
   statusDetail: string;
   plateFiles: Record<string, string>;
   hiddenPlateGroups: number;
+  /** Why plate outlines are not shown yet ("" when fine or not requested). */
+  outlinesNote: string;
   ageInMyr: number;
   cameraHeightM: number;
   isPlaying: boolean;
@@ -27,11 +32,12 @@ export function timelineStatusText(statusInput: TimelineStatusInput): string {
     statusNotes.push("Rotation model unavailable — is the API server running (npm run server)?");
   } else if (statusInput.buildStatus === "failed" || statusInput.buildStatus === "unavailable") {
     statusNotes.push(
-      `Plate layers unavailable: ${statusInput.statusDetail || statusInput.buildStatus} (see public/data/lods/merdith_prep.log)`
+      `Plate layers unavailable: ${statusInput.statusDetail || statusInput.buildStatus} (see ${PREP_LOG_PATH})`
     );
   } else if (!statusInput.plateFiles[WORLD_FILE]) {
     statusNotes.push("Preparing plate layers…");
   }
+  if (statusInput.outlinesNote) statusNotes.push(statusInput.outlinesNote);
   if (statusInput.hiddenPlateGroups > 0 && statusInput.ageInMyr > 0) {
     statusNotes.push("Some plates have no rotation poles at this age (hidden)");
   }

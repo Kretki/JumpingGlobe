@@ -1,7 +1,9 @@
-/** Entry point: build the globe, wire camera, timeline, land layers and selection, and run the frame loop. */
+/** Entry point: build the globe, wire camera, timeline, land layers, plate outlines and selection, and run the frame loop. */
 
+import { fetchPlateOutlines } from "./app/globeApi";
 import { LandLayerController } from "./app/landLayerController";
 import { PlateLayerTracker } from "./app/plateLayerTracker";
+import { PlateOutlineController } from "./app/plateOutlineController";
 import { PointSelection } from "./app/pointSelection";
 import { timelineStatusText } from "./app/timelineStatus";
 import { pickGlobe } from "./camera/globePicking";
@@ -13,12 +15,18 @@ import { lodFileFromHeight, WORLD_FILE } from "./land/lod.config";
 import { GlobeRenderer } from "./rendering/globeRenderer";
 import { mat4Identity, mat4LookAt, mat4Multiply, mat4Perspective } from "./rendering/matrixMath";
 import { GpuMeshSlot } from "./rendering/meshSlot";
+import { PlateOutlineOverlay } from "./rendering/plateOutlineOverlay";
 import { SelectionOverlay } from "./rendering/selectionOverlay";
 import { CoordinatesPanel } from "./ui/coordinatesPanel";
 import { requireElement } from "./ui/domLookup";
-import { LandProgressPanel } from "./ui/landProgressPanel";
-import { SelectionPanel } from "./ui/selectionPanel";
-import { TimelineControl } from "./ui/timelineControl";
+import {
+  createPlateDisplayControls,
+  createPlateLabelLayer,
+  createProgressPanel,
+  createSelectionPanel,
+  createTimeline,
+} from "./ui/panelFactories";
+import type { AgeSource, TimelineControl } from "./ui/timelineControl";
 
 const API_BASE_URL = "/api";
 const MAX_PIXEL_RATIO = 2;
@@ -30,6 +38,8 @@ type GlobeApplication = {
   orbitCamera: OrbitCamera;
   globeRenderer: GlobeRenderer;
   selectionOverlay: SelectionOverlay;
+  outlineOverlay: PlateOutlineOverlay;
+  plateOutlines: PlateOutlineController;
   baseSlot: GpuMeshSlot;
   detailSlot: GpuMeshSlot;
   timeline: TimelineControl;
@@ -59,70 +69,34 @@ function createGlContext(canvasElement: HTMLCanvasElement): WebGLRenderingContex
 }
 
 /**
- * Create the timeline control from its DOM elements.
+ * Create the plate-outline wireframe, its labels, checkboxes and controller.
  *
- * Usage: start-up.
+ * Usage: start-up, from createApplication.
  *
- * @param onAgeChange - Called when the age changes.
- * @returns The control.
+ * @param outlineOverlay - GL wireframe.
+ * @param plateTracker - Rotation model and outline file name.
+ * @param ageSource - Displayed age.
+ * @param onStatusChange - Refreshes the timeline status line.
+ * @returns The controller.
  */
-function createTimeline(onAgeChange: (ageInMyr: number) => void): TimelineControl {
-  return new TimelineControl(
-    {
-      ageSlider: requireElement("tl-age", HTMLInputElement),
-      ageReadout: requireElement("tl-readout", HTMLOutputElement),
-      playButton: requireElement("tl-play", HTMLButtonElement),
-      speedSelect: requireElement("tl-speed", HTMLSelectElement),
-      reverseCheckbox: requireElement("tl-reverse", HTMLInputElement),
-      startLabel: requireElement("tl-start", HTMLSpanElement),
-      endLabel: requireElement("tl-end", HTMLSpanElement),
-      statusElement: requireElement("tl-status", HTMLSpanElement),
-    },
-    onAgeChange
-  );
-}
-
-/**
- * Create the land progress card from its DOM elements.
- *
- * Usage: start-up.
- *
- * @returns The panel.
- */
-function createProgressPanel(): LandProgressPanel {
-  const panelElement = requireElement("land-progress", HTMLDivElement);
-  const percentElement = panelElement.querySelector(".pct");
-  if (!(percentElement instanceof HTMLElement)) throw new Error("#land-progress .pct is missing");
-  return new LandProgressPanel({
-    panelElement,
-    fillElement: requireElement("land-progress-fill", HTMLElement),
-    labelElement: requireElement("land-progress-label", HTMLDivElement),
-    percentElement,
+function createPlateOutlines(
+  outlineOverlay: PlateOutlineOverlay,
+  plateTracker: PlateLayerTracker,
+  ageSource: AgeSource,
+  onStatusChange: () => void
+): PlateOutlineController {
+  let plateOutlines: PlateOutlineController | null = null;
+  const displayChoice = createPlateDisplayControls(() => plateOutlines?.handleDisplayChange());
+  plateOutlines = new PlateOutlineController({
+    outlineSource: plateTracker,
+    ageSource,
+    displayChoice,
+    lineSink: outlineOverlay,
+    labelSink: createPlateLabelLayer(),
+    loadOutlines: fetchPlateOutlines,
+    onStatusChange,
   });
-}
-
-/**
- * Create the selection panel from its DOM elements.
- *
- * Usage: start-up.
- *
- * @param onClearRequest - Called when the user clears the selection.
- * @returns The panel.
- */
-function createSelectionPanel(onClearRequest: () => void): SelectionPanel {
-  return new SelectionPanel(
-    {
-      panelElement: requireElement("point-panel", HTMLElement),
-      plateElement: requireElement("pp-plate", HTMLElement),
-      presentElement: requireElement("pp-present", HTMLElement),
-      ageLabelElement: requireElement("pp-age-label", HTMLElement),
-      positionElement: requireElement("pp-at", HTMLElement),
-      trackElement: requireElement("pp-track", HTMLElement),
-      noteElement: requireElement("pp-note", HTMLElement),
-      clearButton: requireElement("pp-clear", HTMLButtonElement),
-    },
-    onClearRequest
-  );
+  return plateOutlines;
 }
 
 /**
@@ -138,12 +112,14 @@ function createApplication(): GlobeApplication {
   const orbitCamera = new OrbitCamera();
   const globeRenderer = new GlobeRenderer(glContext);
   const selectionOverlay = new SelectionOverlay(glContext, globeRenderer.globeProgram, globeRenderer.normalAttribute);
+  const outlineOverlay = new PlateOutlineOverlay(glContext, globeRenderer.globeProgram, globeRenderer.normalAttribute);
   const baseSlot = new GpuMeshSlot(glContext);
   const detailSlot = new GpuMeshSlot(glContext);
 
   // Late-bound references: the components below refer to each other through callbacks.
   let landLayers: LandLayerController | null = null;
   let plateTracker: PlateLayerTracker | null = null;
+  let plateOutlines: PlateOutlineController | null = null;
   const timeline = createTimeline((ageInMyr) => landLayers?.handleAgeChange(ageInMyr));
 
   const refreshTimelineStatus = () => {
@@ -155,6 +131,7 @@ function createApplication(): GlobeApplication {
         statusDetail: plateTracker.statusDetail,
         plateFiles: plateTracker.plateFiles,
         hiddenPlateGroups: landLayers.hiddenPlateGroups,
+        outlinesNote: plateOutlines?.statusNote ?? "",
         ageInMyr: timeline.currentAgeMa,
         cameraHeightM: orbitCamera.heightMeters,
         isPlaying: timeline.isPlaying,
@@ -186,6 +163,8 @@ function createApplication(): GlobeApplication {
     onStatusChange: refreshTimelineStatus,
   });
 
+  plateOutlines = createPlateOutlines(outlineOverlay, plateTracker, timeline, refreshTimelineStatus);
+
   let pointSelection: PointSelection | null = null;
   const selectionPanel = createSelectionPanel(() => pointSelection?.clearSelection());
   pointSelection = new PointSelection({ plateTracker, ageSource: timeline, selectionPanel, selectionOverlay });
@@ -201,6 +180,8 @@ function createApplication(): GlobeApplication {
     orbitCamera,
     globeRenderer,
     selectionOverlay,
+    outlineOverlay,
+    plateOutlines,
     baseSlot,
     detailSlot,
     timeline,
@@ -285,12 +266,19 @@ function renderFrame(globeApp: GlobeApplication, deltaSeconds: number): void {
   const modelMatrix = mat4Identity();
   const modelViewProj = mat4Multiply(projectionMatrix, mat4Multiply(viewMatrix, modelMatrix));
 
+  globeApp.plateOutlines.updateFrame({
+    modelViewProj,
+    eyePosition,
+    viewportWidth: globeApp.canvasElement.clientWidth,
+    viewportHeight: globeApp.canvasElement.clientHeight,
+  });
   globeApp.globeRenderer.drawFrame(
     { modelViewProj, modelMatrix, eyePosition },
     globeApp.baseSlot,
     globeApp.detailSlot,
     globeApp.landLayers.detailClip
   );
+  if (globeApp.plateOutlines.isShowing) globeApp.outlineOverlay.drawOutlines(modelViewProj, orbitCamera.heightMeters);
   const selectionMarkers = globeApp.pointSelection.currentMarkers();
   if (selectionMarkers) {
     globeApp.selectionOverlay.drawSelection(modelViewProj, orbitCamera.heightMeters, selectionMarkers.presentUnit, selectionMarkers.currentUnit);

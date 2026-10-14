@@ -243,6 +243,20 @@ function isCovered(landMesh: LandMesh, longitudeDeg: number, latitudeDeg: number
   assertCheck(longitudeAt(2, 80) === null, "missing poles in the chain hide the plate instead of snapping it home");
   assertCheck(longitudeAt(999999, 10) === null, "unknown plate has no rotation");
   assertCheck(longitudeAt(2, 0) === 0, "present day is identity");
+
+  // Two rotation files concatenated per plate (Cao et al. 2024: 0–1000 Ma, then 1000–1800 Ma):
+  // the age goes back where the second file starts, which must open a new sequence.
+  const splitTree = new RotationTree({
+    maxAge: 200,
+    anchorPlate: 0,
+    plates: { "3": [[0, 90, 0, 0, 0], [100, 90, 0, 90, 0], [50, 90, 0, 0, 0], [200, 90, 0, 150, 0]] },
+  });
+  const splitLongitudeAt = (ageInMyr: number) => {
+    quatRotate(splitTree.totalRotation(3, ageInMyr)!, 1, 0, 0, rotatedVec);
+    return Math.atan2(rotatedVec[1], rotatedVec[0]) * (180 / Math.PI);
+  };
+  assertCheck(Math.abs(splitLongitudeAt(75) - 67.5) < 1e-9, "first file wins where two files overlap");
+  assertCheck(Math.abs(splitLongitudeAt(150) - 100) < 1e-9, "second file continues past the first file's range");
 }
 
 console.log("\nAll land geometry / mesh / rotation self-checks passed.");

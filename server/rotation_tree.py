@@ -17,10 +17,12 @@ RotationMemo = dict[int, Quaternion | None]
 
 
 def build_sequences(pole_rows: list[list[float]]) -> list[PoleSequence]:
-    """Group a moving plate's poles into runs with the same fixed plate.
+    """Group a moving plate's poles into runs with the same fixed plate and ascending ages.
 
     Usage:
-        Called once per moving plate when the tree is built.
+        Called once per moving plate when the tree is built. A new run starts when
+        the fixed plate changes (crossover) or the age goes back (the next
+        rotation file of a multi-file model), so every run is interpolable.
 
     Args:
         pole_rows: Rows ``[age, lat, lon, angle, fixed_id]`` in file order.
@@ -30,7 +32,7 @@ def build_sequences(pole_rows: list[list[float]]) -> list[PoleSequence]:
     """
     sequences: list[PoleSequence] = []
     for age_in_ma, pole_latitude, pole_longitude, angle_deg, fixed_plate in pole_rows:
-        if not sequences or sequences[-1][0] != int(fixed_plate):
+        if not sequences or sequences[-1][0] != int(fixed_plate) or float(age_in_ma) < sequences[-1][1][-1]:
             sequences.append((int(fixed_plate), [], []))
         sequences[-1][1].append(float(age_in_ma))
         sequences[-1][2].append(quat_from_pole(pole_latitude, pole_longitude, angle_deg))

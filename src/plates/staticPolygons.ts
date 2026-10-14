@@ -1,5 +1,5 @@
 /**
- * Merdith static polygons (present-day coordinates) and the "which plate is under this point" lookup.
+ * Static polygons of the plate model (present-day coordinates) and the "which plate is under this point" lookup.
  *
  * A point clicked at age t lies on plate P if rotating it back by P's rotation at t
  * lands inside one of P's static polygons valid at t.
@@ -78,7 +78,7 @@ function exteriorEnvelope(polygonRings: number[][][][]): [number, number, number
 }
 
 /**
- * Parse the /api/land FeatureCollection of merdith_static.gpkg.
+ * Parse the /api/land FeatureCollection of the static-polygon file (e.g. cao_static.gpkg).
  *
  * Usage: once, when the static-polygon layer is ready.
  *

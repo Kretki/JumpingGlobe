@@ -1,6 +1,7 @@
 /** Typed, validated access to the non-land API endpoints. */
 
 import type { RotationModel } from "../plates/rotationTree";
+import { parsePlateOutlines, type PlateOutline } from "../plates/plateOutlines";
 import { parseStaticPolygons, type StaticFeatureCollection, type StaticPolygon } from "../plates/staticPolygons";
 
 const API_PREFIX = "/api";
@@ -14,6 +15,7 @@ export type PlateStatusResponse = {
   detail: string;
   plateFiles: Record<string, string>;
   staticFile: string | null;
+  outlinesFile: string | null;
 };
 
 /**
@@ -93,7 +95,24 @@ export async function fetchPlateStatus(): Promise<PlateStatusResponse> {
     detail: typeof responseBody.detail === "string" ? responseBody.detail : "",
     plateFiles: stringMap(responseBody.plateFiles),
     staticFile: typeof responseBody.staticFile === "string" ? responseBody.staticFile : null,
+    outlinesFile: typeof responseBody.outlinesFile === "string" ? responseBody.outlinesFile : null,
   };
+}
+
+/**
+ * GET a whole-world GeoJSON layer from /api/land.
+ *
+ * Usage: static polygons and plate outlines (small files loaded once).
+ *
+ * @param layerFile - File name reported by /api/plates/status.
+ * @returns The FeatureCollection.
+ * @throws Error when the request fails or the body is not a FeatureCollection.
+ */
+async function fetchWorldLayer(layerFile: string): Promise<StaticFeatureCollection> {
+  const queryParams = new URLSearchParams({ file: layerFile, bbox: "-180,-90,180,90", limit: "100000", min_area: "0" });
+  const responseBody = await fetchJson(`/land?${queryParams}`);
+  if (!isRecord(responseBody) || !Array.isArray(responseBody.features)) throw new Error(`invalid layer ${layerFile}`);
+  return responseBody as unknown as StaticFeatureCollection;
 }
 
 /**
@@ -106,8 +125,18 @@ export async function fetchPlateStatus(): Promise<PlateStatusResponse> {
  * @throws Error when the request fails or the body is not a FeatureCollection.
  */
 export async function fetchStaticPolygons(staticFile: string): Promise<StaticPolygon[]> {
-  const queryParams = new URLSearchParams({ file: staticFile, bbox: "-180,-90,180,90", limit: "100000", min_area: "0" });
-  const responseBody = await fetchJson(`/land?${queryParams}`);
-  if (!isRecord(responseBody) || !Array.isArray(responseBody.features)) throw new Error("invalid static polygons");
-  return parseStaticPolygons(responseBody as unknown as StaticFeatureCollection);
+  return parseStaticPolygons(await fetchWorldLayer(staticFile));
+}
+
+/**
+ * Load and prepare the plate-outline layer.
+ *
+ * Usage: first time the user ticks "Plate outlines".
+ *
+ * @param outlinesFile - File name reported by /api/plates/status.
+ * @returns Outlines ready for reconstruction.
+ * @throws Error when the request fails or the body is not a FeatureCollection.
+ */
+export async function fetchPlateOutlines(outlinesFile: string): Promise<PlateOutline[]> {
+  return parsePlateOutlines(await fetchWorldLayer(outlinesFile));
 }

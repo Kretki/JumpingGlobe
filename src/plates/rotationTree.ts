@@ -1,11 +1,13 @@
 /**
- * GPlates-style plate reconstruction from a .rot model (Merdith et al. 2021).
+ * GPlates-style plate reconstruction from a .rot model (lod.json plateModel; Cao et al. 2024).
  *
  * Each row of the rotation file is a *total* reconstruction pole: the finite
  * rotation of a moving plate relative to a fixed plate that takes present-day
  * geometry to its position at that age. Rows of one moving plate with the same
  * fixed plate form an interpolation sequence (quaternion slerp between poles);
- * the fixed plate may change between sequences (crossovers). The rotation of a
+ * the fixed plate may change between sequences (crossovers). Models split over
+ * several files arrive concatenated per plate, so a new sequence also starts where
+ * the age goes back (the next file). The rotation of a
  * plate relative to the anchor (000, spin axis) is the chain
  *   R(P→0, t) = R(F→0, t) · R(P→F, t).
  */
@@ -27,18 +29,19 @@ type PoleSequence = { fixedPlate: number; sequenceAges: number[]; quaternions: Q
 const MAX_CHAIN_DEPTH = 64;
 
 /**
- * Group a moving plate's poles into runs with the same fixed plate.
+ * Group a moving plate's poles into runs with the same fixed plate and ascending ages.
  *
- * Usage: once per plate when the tree is built.
+ * Usage: once per plate when the tree is built (mirror of server/rotation_tree.py build_sequences).
  *
- * @param plateRows - Poles in file order.
- * @returns Sequences in file order.
+ * @param plateRows - Poles in file order (several files concatenated).
+ * @returns Sequences in file order; earlier ones win where age ranges overlap.
  */
 function buildSequences(plateRows: RotationPole[]): PoleSequence[] {
   const sequenceList: PoleSequence[] = [];
   let currentSequence: PoleSequence | null = null;
   for (const [poleAgeMa, poleLatitude, poleLongitude, angleDeg, fixedPlate] of plateRows) {
-    if (!currentSequence || currentSequence.fixedPlate !== fixedPlate) {
+    const previousAge = currentSequence?.sequenceAges[currentSequence.sequenceAges.length - 1] ?? -Infinity;
+    if (!currentSequence || currentSequence.fixedPlate !== fixedPlate || poleAgeMa < previousAge) {
       currentSequence = { fixedPlate, sequenceAges: [], quaternions: [] };
       sequenceList.push(currentSequence);
     }

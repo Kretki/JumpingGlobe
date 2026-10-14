@@ -121,7 +121,7 @@ def _register_status_routes(api_router: APIRouter, dependencies: RouteDependenci
 
     @api_router.get("/rotations")
     def rotation_model() -> Response:
-        """Merdith et al. 2021 rotation model: total poles per moving plate (file order).
+        """Plate rotation model (lod.json plateModel): total poles per moving plate (file order).
 
         Usage:
             ``GET /api/rotations``; the client builds its RotationTree from it.
@@ -141,7 +141,7 @@ def _register_status_routes(api_router: APIRouter, dependencies: RouteDependenci
             ``GET /api/plates/status``; also kicks off a rebuild of stale layers.
 
         Returns:
-            ``{"status", "detail", "plateFiles": {lod: twin}, "staticFile"}``.
+            ``{"status", "detail", "plateFiles": {lod: twin}, "staticFile", "outlinesFile"}``.
         """
         plate_status.ensure_built()
         return {
@@ -149,6 +149,7 @@ def _register_status_routes(api_router: APIRouter, dependencies: RouteDependenci
             "detail": plate_status.status_detail,
             "plateFiles": plate_status.ready_plate_files(),
             "staticFile": plate_status.static_file(),
+            "outlinesFile": plate_status.outlines_file(),
         }
 
     @api_router.get("/land/stats")

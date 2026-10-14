@@ -1,10 +1,11 @@
 """
 Build the plate-reconstruction layers on demand (background thread).
 
-The timeline needs derived GeoPackages in dataDir (see public/data/merdith_prep.sh):
-plate-tagged twins of every land LOD and a simplified static-polygon file for
-point picking. They are rebuilt when missing or older than their sources, so a fresh
-checkout or a LOD rebuild works without a manual step. Existing LOD files are never
+The timeline needs derived GeoPackages in dataDir, written by the plate model's prep
+script (lod.json plateModel.prepScript, e.g. public/external/cao_prep.sh): plate-tagged
+twins of every land LOD, a simplified static-polygon file for point picking and the
+plate-outline file drawn as a wireframe. They are rebuilt when missing or older than
+their sources, so a fresh checkout or a LOD rebuild works without a manual step. Existing LOD files are never
 modified. The world LOD is tagged first (seconds); detail LODs follow (minutes) and
 become usable one by one.
 """
@@ -15,57 +16,15 @@ from __future__ import annotations
 import subprocess  # nosec B404
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from server.lod_config import BAND_FILES, DATA_DIR, MERDITH_DIR, PROJECT_ROOT, STATIC_POLYGONS_FILE, plate_twin_name
+from server.plate_layer_paths import PlateLayerPaths
 
 BUILD_TIMEOUT_SECONDS = 6 * 3600
 STATUS_READY = "ready"
 STATUS_BUILDING = "building"
 STATUS_FAILED = "failed"
 STATUS_UNAVAILABLE = "unavailable"
-
-
-@dataclass(frozen=True)
-class PlateLayerPaths:
-    """Filesystem inputs and outputs of the plate-layer build."""
-
-    project_root: Path
-    data_directory: Path
-    merdith_directory: Path
-    band_files: list[str]
-    static_file: str
-    prep_script: Path
-    log_file: Path
-    static_gpml: Path
-    tool_sources: list[Path] = field(default_factory=list)
-
-
-def default_plate_layer_paths() -> PlateLayerPaths:
-    """Build the paths from lod.json and the repository layout.
-
-    Usage:
-        ``PlateLayerBuilder(default_plate_layer_paths())``.
-
-    Returns:
-        PlateLayerPaths for this checkout. Tool sources include every Python file
-        of the tagging tools, so editing them triggers a rebuild.
-    """
-    tools_directory = PROJECT_ROOT / "tools"
-    tool_sources = [tools_directory / "plate_tag.py", tools_directory / "gpml_to_geojson.py"]
-    tool_sources += sorted((tools_directory / "plate_tagging").glob("*.py"))
-    return PlateLayerPaths(
-        project_root=PROJECT_ROOT,
-        data_directory=DATA_DIR,
-        merdith_directory=MERDITH_DIR,
-        band_files=list(BAND_FILES),
-        static_file=STATIC_POLYGONS_FILE,
-        prep_script=PROJECT_ROOT / "public" / "data" / "merdith_prep.sh",
-        log_file=DATA_DIR / "merdith_prep.log",
-        static_gpml=MERDITH_DIR / "shapes_static_polygons_Merdith_et_al.gpml",
-        tool_sources=tool_sources,
-    )
 
 
 def modified_time(file_path: Path) -> float:
@@ -105,7 +64,7 @@ def last_log_line(log_path: Path) -> str:
 class PlateLayerBuilder:
     """Tracks the plate layers and rebuilds stale ones in the background.
 
-    ``build_status`` is one of 'ready', 'building', 'failed' or 'unavailable' (no Merdith sources).
+    ``build_status`` is one of 'ready', 'building', 'failed' or 'unavailable' (no plate-model sources).
     """
 
     def __init__(self, layer_paths: PlateLayerPaths, on_rebuilt: Callable[[], None] | None = None) -> None:
@@ -157,6 +116,20 @@ class PlateLayerBuilder:
             newest_source = max(newest_source, modified_time(source_path))
         return modified_time(output_path) >= newest_source
 
+    def _fresh_shared_file(self, file_name: str) -> str | None:
+        """Return a derived file name that depends only on the shared sources, when up to date.
+
+        Usage:
+            Static-polygon and plate-outline files.
+
+        Args:
+            file_name: File name inside the data directory.
+
+        Returns:
+            The file name, or None while it is missing or stale.
+        """
+        return file_name if self._is_fresh(self._layer_paths.data_directory / file_name, None) else None
+
     def static_file(self) -> str | None:
         """Return the static-polygon file name when it is up to date.
 
@@ -166,8 +139,18 @@ class PlateLayerBuilder:
         Returns:
             The file name, or None while it is missing or stale.
         """
-        static_path = self._layer_paths.data_directory / self._layer_paths.static_file
-        return self._layer_paths.static_file if self._is_fresh(static_path, None) else None
+        return self._fresh_shared_file(self._layer_paths.static_file)
+
+    def outlines_file(self) -> str | None:
+        """Return the plate-outline file name when it is up to date.
+
+        Usage:
+            Reported as ``outlinesFile`` by /api/plates/status.
+
+        Returns:
+            The file name, or None while it is missing or stale.
+        """
+        return self._fresh_shared_file(self._layer_paths.outlines_file)
 
     def ready_plate_files(self) -> dict[str, str]:
         """Map each LOD file to its plate-tagged twin, for twins that are up to date.
@@ -180,7 +163,7 @@ class PlateLayerBuilder:
         """
         ready_files: dict[str, str] = {}
         for lod_file in self._layer_paths.band_files:
-            twin_file = plate_twin_name(lod_file)
+            twin_file = self._layer_paths.twin_namer(lod_file)
             lod_path = self._layer_paths.data_directory / lod_file
             if lod_path.is_file() and self._is_fresh(self._layer_paths.data_directory / twin_file, lod_path):
                 ready_files[lod_file] = twin_file
@@ -209,17 +192,17 @@ class PlateLayerBuilder:
                 for lod_file in self._layer_paths.band_files
                 if (self._layer_paths.data_directory / lod_file).is_file() and lod_file not in ready_files
             ]
-            if not pending_lods and self.static_file():
+            if not pending_lods and self.static_file() and self.outlines_file():
                 self.build_status, self.status_detail = STATUS_READY, ""
                 return
             if self.build_status == STATUS_FAILED:
                 return
             self.build_status, self.status_detail = STATUS_BUILDING, ""
         build_lods = pending_lods or self._layer_paths.band_files[:1]
-        threading.Thread(target=self._run_build, args=(build_lods,), name="merdith-prep", daemon=True).start()
+        threading.Thread(target=self._run_build, args=(build_lods,), name="plate-model-prep", daemon=True).start()
 
     def _run_build(self, lod_files: list[str]) -> None:
-        """Run merdith_prep.sh for the given LODs and record the outcome.
+        """Run the plate model's prep script for the given LODs and record the outcome.
 
         Usage:
             Thread target started by ensure_built().
@@ -234,7 +217,8 @@ class PlateLayerBuilder:
             "bash",
             str(self._layer_paths.prep_script),
             str(self._layer_paths.data_directory),
-            str(self._layer_paths.merdith_directory),
+            str(self._layer_paths.static_gpml),
+            self._layer_paths.model_tag,
             *lod_files,
         ]
         try:
@@ -258,4 +242,5 @@ class PlateLayerBuilder:
             self.build_status, self.status_detail = STATUS_READY, ""
             return
         self.build_status = STATUS_FAILED
-        self.status_detail = self.status_detail or last_log_line(self._layer_paths.log_file) or "merdith_prep.sh failed"
+        failure_reason = last_log_line(self._layer_paths.log_file) or f"{self._layer_paths.prep_script.name} failed"
+        self.status_detail = self.status_detail or failure_reason

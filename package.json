@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:land": "tsx src/land/landGeometry.test.ts",
+    "test:plates": "tsx src/plates/plateOutlines.test.ts",
     "lint": "eslint ."
   },
   "devDependencies": {

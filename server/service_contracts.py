@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from server.rotation_tree import RotationTree
 from server.spherical_geometry import BoundingBox
 
 
@@ -51,6 +52,14 @@ class RotationResponder(Protocol):
         ...
 
 
+class RotationTreeSource(Protocol):
+    """Supplies the current rotation tree (for past-age land queries)."""
+
+    def rotation_tree(self) -> RotationTree:
+        """Return the rotation tree of the current model files."""
+        ...
+
+
 class PlateLayerStatus(Protocol):
     """Readiness of the derived plate layers."""
 
@@ -67,4 +76,8 @@ class PlateLayerStatus(Protocol):
 
     def static_file(self) -> str | None:
         """Return the static-polygon file name when it is up to date."""
+        ...
+
+    def outlines_file(self) -> str | None:
+        """Return the plate-outline file name when it is up to date."""
         ...
