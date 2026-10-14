@@ -254,7 +254,7 @@ export class LandLayerController {
   /**
    * Drop the detail layer and everything cached for it.
    *
-   * Usage: zoomed out to the world LOD, age changed, or LOD changed.
+   * Usage: zoomed out to the world LOD, age changed, or timeline playing in the past.
    *
    * @returns Nothing.
    */
@@ -325,7 +325,7 @@ export class LandLayerController {
         this.dropDetailIfShown();
         return;
       }
-      if (this.lastLoadFile !== lodFileName && this.layerDeps.detailSlot.indexCount > 0) this.clearDetail();
+      // A changed LOD keeps the previous detail on screen until its replacement is uploaded.
       this.schedulePastLoad(viewSnapshot, lodFileName, twinFile);
       return;
     }
