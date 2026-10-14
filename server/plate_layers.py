@@ -12,53 +12,20 @@ become usable one by one.
 
 from __future__ import annotations
 
-# subprocess only runs one fixed, repository-owned script with an argument list (no shell).
-import subprocess  # nosec B404
 import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from server.build_utils import (
+    STATUS_BUILDING,
+    STATUS_FAILED,
+    STATUS_READY,
+    STATUS_UNAVAILABLE,
+    last_log_line,
+    modified_time,
+    run_logged_script,
+)
 from server.plate_layer_paths import PlateLayerPaths
-
-BUILD_TIMEOUT_SECONDS = 6 * 3600
-STATUS_READY = "ready"
-STATUS_BUILDING = "building"
-STATUS_FAILED = "failed"
-STATUS_UNAVAILABLE = "unavailable"
-
-
-def modified_time(file_path: Path) -> float:
-    """Return a file's modification time, or -1 when it does not exist.
-
-    Usage:
-        Staleness checks (an output is fresh when not older than its sources).
-
-    Args:
-        file_path: File to inspect.
-
-    Returns:
-        ``st_mtime`` in seconds, or -1.0 for missing files.
-    """
-    return file_path.stat().st_mtime if file_path.is_file() else -1.0
-
-
-def last_log_line(log_path: Path) -> str:
-    """Return the last non-empty line of a log file.
-
-    Usage:
-        Short failure reason for the status endpoint.
-
-    Args:
-        log_path: Log file to read.
-
-    Returns:
-        The last line, or "" when the file is missing, unreadable or empty.
-    """
-    try:
-        log_lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-    except OSError:
-        return ""
-    return log_lines[-1] if log_lines else ""
 
 
 class PlateLayerBuilder:
@@ -221,21 +188,9 @@ class PlateLayerBuilder:
             self._layer_paths.model_tag,
             *lod_files,
         ]
-        try:
-            with open(self._layer_paths.log_file, "w", encoding="utf-8") as log_stream:
-                # Argument list, no shell; every argument comes from lod.json or the repo layout.
-                completed = subprocess.run(  # noqa: S603  # nosec B603
-                    command_line,
-                    stdout=log_stream,
-                    stderr=subprocess.STDOUT,
-                    cwd=self._layer_paths.project_root,
-                    timeout=BUILD_TIMEOUT_SECONDS,
-                    check=False,
-                )
-            succeeded = completed.returncode == 0
-        except (OSError, subprocess.SubprocessError) as exception:
-            succeeded = False
-            self.status_detail = str(exception)
+        succeeded, self.status_detail = run_logged_script(
+            command_line, self._layer_paths.log_file, self._layer_paths.project_root
+        )
         if self._on_rebuilt:
             self._on_rebuilt()
         if succeeded:

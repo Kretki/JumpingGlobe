@@ -51,6 +51,8 @@ export class PlateLabelLayer {
     placedLabels.forEach((placedLabel, labelIdx) => {
       const labelElement = this.elementAt(labelIdx);
       if (labelElement.textContent !== placedLabel.labelText) labelElement.textContent = placedLabel.labelText;
+      const styleClass = `${LABEL_CLASS} ${LABEL_CLASS}--${placedLabel.labelStyle}`;
+      if (labelElement.className !== styleClass) labelElement.className = styleClass;
       labelElement.style.transform = `translate(${placedLabel.screenX.toFixed(1)}px, ${placedLabel.screenY.toFixed(1)}px) translate(-50%, -50%)`;
       labelElement.hidden = false;
     });

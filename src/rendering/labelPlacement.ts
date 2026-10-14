@@ -4,11 +4,14 @@ import { writeSurfacePoint } from "../geodesy/wgs84Ellipsoid";
 import type { UnitVector } from "../plates/sphericalCoords";
 import type { Matrix4x4 } from "./matrixMath";
 
-/** A label to place: text and its direction on the GPlates sphere. */
-export type LabelRequest = { labelText: string; labelUnit: UnitVector };
+/** Visual kind of a label (CSS modifier): plain plate name or a tectonic annotation. */
+export type LabelStyle = "plate" | "subducting" | "appear" | "vanish";
 
-/** A placed label: text and the CSS-pixel position of its centre. */
-export type PlacedLabel = { labelText: string; screenX: number; screenY: number };
+/** A label to place: text, its direction on the GPlates sphere and its style (default "plate"). */
+export type LabelRequest = { labelText: string; labelUnit: UnitVector; labelStyle?: LabelStyle };
+
+/** A placed label: text, style and the CSS-pixel position of its centre. */
+export type PlacedLabel = { labelText: string; labelStyle: LabelStyle; screenX: number; screenY: number };
 
 /** Camera and viewport of the frame the labels are placed for. */
 export type LabelView = {
@@ -132,7 +135,12 @@ export function placeLabels(labelRequests: LabelRequest[], labelView: LabelView)
     const candidateRect = labelRect(labelRequest.labelText, screenPoint[0], screenPoint[1]);
     if (takenRects.some((takenRect) => rectsOverlap(takenRect, candidateRect))) continue;
     takenRects.push(candidateRect);
-    placedLabels.push({ labelText: labelRequest.labelText, screenX: screenPoint[0], screenY: screenPoint[1] });
+    placedLabels.push({
+      labelText: labelRequest.labelText,
+      labelStyle: labelRequest.labelStyle ?? "plate",
+      screenX: screenPoint[0],
+      screenY: screenPoint[1],
+    });
   }
   return placedLabels;
 }

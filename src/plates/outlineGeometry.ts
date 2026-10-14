@@ -8,6 +8,7 @@
  */
 
 import { lonLatToUnit, type UnitVector } from "./sphericalCoords";
+import { arcAngle, pointAlongArc } from "./unitVectorMath";
 
 /** Longer edges are split so the line follows the sphere instead of cutting under it. */
 const MAX_SEGMENT_DEG = 1;
@@ -37,51 +38,16 @@ export function isSeamEdge(startPoint: number[], endPoint: number[]): boolean {
 }
 
 /**
- * Great-circle angle between two unit vectors.
- *
- * Usage: edge length for densification and centroid weights.
- *
- * @param firstUnit - First unit vector.
- * @param secondUnit - Second unit vector.
- * @returns Angle in radians, 0..π.
- */
-function arcAngle(firstUnit: UnitVector, secondUnit: UnitVector): number {
-  const crossVecX = firstUnit[1] * secondUnit[2] - firstUnit[2] * secondUnit[1];
-  const crossVecY = firstUnit[2] * secondUnit[0] - firstUnit[0] * secondUnit[2];
-  const crossVecZ = firstUnit[0] * secondUnit[1] - firstUnit[1] * secondUnit[0];
-  const dotProduct = firstUnit[0] * secondUnit[0] + firstUnit[1] * secondUnit[1] + firstUnit[2] * secondUnit[2];
-  return Math.atan2(Math.hypot(crossVecX, crossVecY, crossVecZ), dotProduct);
-}
-
-/**
- * Point at a fraction of the great-circle arc between two unit vectors.
- *
- * Usage: densify long edges (normalised linear blend stays on the arc's plane).
- *
- * @param startUnit - Arc start.
- * @param arcEndUnit - Arc end (not antipodal to the start).
- * @param fraction - Position along the arc, 0..1.
- * @returns Unit vector on the arc.
- */
-function pointAlongArc(startUnit: UnitVector, arcEndUnit: UnitVector, fraction: number): UnitVector {
-  const blendVecX = startUnit[0] + (arcEndUnit[0] - startUnit[0]) * fraction;
-  const blendVecY = startUnit[1] + (arcEndUnit[1] - startUnit[1]) * fraction;
-  const blendVecZ = startUnit[2] + (arcEndUnit[2] - startUnit[2]) * fraction;
-  const blendLength = Math.hypot(blendVecX, blendVecY, blendVecZ) || 1;
-  return [blendVecX / blendLength, blendVecY / blendLength, blendVecZ / blendLength];
-}
-
-/**
  * Append one edge as GL_LINES vertex pairs, split into pieces of at most 1°.
  *
- * Usage: per drawable ring edge.
+ * Usage: per drawable ring edge, and every line drawn by the plate-boundary layers.
  *
  * @param startUnit - Edge start.
  * @param arcEndUnit - Edge end.
  * @param segmentValues - Flat xyz list extended in place (two vertices per piece).
  * @returns Nothing.
  */
-function appendEdgeSegments(startUnit: UnitVector, arcEndUnit: UnitVector, segmentValues: number[]): void {
+export function appendEdgeSegments(startUnit: UnitVector, arcEndUnit: UnitVector, segmentValues: number[]): void {
   const edgeAngleDeg = arcAngle(startUnit, arcEndUnit) * RAD_TO_DEG;
   if (edgeAngleDeg <= 0) return;
   const pieceCount = Math.max(1, Math.ceil(edgeAngleDeg / MAX_SEGMENT_DEG));

@@ -8,7 +8,15 @@
     "rotationFiles": ["1000_0_rotfile.rot", "1800_1000_rotfile.rot"],
     "staticPolygons": "static_polygons.gpmlz",
     "maxAgeMa": 1800,
-    "prepScript": "public/external/cao_prep.sh"
+    "prepScript": "public/external/cao_prep.sh",
+    "topologyFiles": [
+      "250-0_plate_boundaries.gpml",
+      "410-250_plate_boundaries.gpml",
+      "1000-410_plate_boundaries.gpml",
+      "1800-1000_plate_boundaries.gpml",
+      "TopologyBuildingBlocks.gpml"
+    ],
+    "topologyScript": "public/external/cao_topologies.sh"
   },
   "bands": [
     { "file": "land_lod0.gpkg", "orderNum": 0, "maxEdgeM": 150000, "maxBoundaryEdgeM": 150000 },

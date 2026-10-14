@@ -81,3 +81,26 @@ class PlateLayerStatus(Protocol):
     def outlines_file(self) -> str | None:
         """Return the plate-outline file name when it is up to date."""
         ...
+
+
+class TopologyStatus(Protocol):
+    """Readiness of the exported plate-topology model."""
+
+    build_status: str
+    status_detail: str
+
+    def ensure_built(self) -> None:
+        """Start a background export if the model file is stale."""
+        ...
+
+    def topology_file(self) -> str | None:
+        """Return the topology file name when it is up to date."""
+        ...
+
+
+class TopologyResponder(Protocol):
+    """Serves the plate-topology model."""
+
+    def topology_json(self) -> bytes | None:
+        """Return the model JSON, or None while it is not ready."""
+        ...

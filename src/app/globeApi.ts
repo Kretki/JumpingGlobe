@@ -3,6 +3,7 @@
 import type { RotationModel } from "../plates/rotationTree";
 import { parsePlateOutlines, type PlateOutline } from "../plates/plateOutlines";
 import { parseStaticPolygons, type StaticFeatureCollection, type StaticPolygon } from "../plates/staticPolygons";
+import { parseTopologyModel, type TopologyModel } from "../plates/topology/topologyModel";
 
 const API_PREFIX = "/api";
 const PLATE_STATUSES = ["ready", "building", "failed", "unavailable"] as const;
@@ -16,6 +17,10 @@ export type PlateStatusResponse = {
   plateFiles: Record<string, string>;
   staticFile: string | null;
   outlinesFile: string | null;
+  /** Build state of the plate-topology model (same values as ``status``). */
+  topologyStatus: PlateBuildStatus;
+  topologyDetail: string;
+  topologyFile: string | null;
 };
 
 /**
@@ -79,6 +84,18 @@ export async function fetchRotationModel(): Promise<RotationModel> {
 }
 
 /**
+ * Validate a build status value.
+ *
+ * Usage: plate-layer and topology statuses.
+ *
+ * @param rawStatus - Value from the response.
+ * @returns The status; unknown values become "failed".
+ */
+function buildStatusOf(rawStatus: unknown): PlateBuildStatus {
+  return PLATE_STATUSES.includes(rawStatus as PlateBuildStatus) ? (rawStatus as PlateBuildStatus) : "failed";
+}
+
+/**
  * Load the plate-layer build status.
  *
  * Usage: polled while the server builds the layers.
@@ -89,13 +106,15 @@ export async function fetchRotationModel(): Promise<RotationModel> {
 export async function fetchPlateStatus(): Promise<PlateStatusResponse> {
   const responseBody = await fetchJson("/plates/status");
   if (!isRecord(responseBody)) throw new Error("invalid plate status");
-  const rawStatus = responseBody.status;
   return {
-    status: PLATE_STATUSES.includes(rawStatus as PlateBuildStatus) ? (rawStatus as PlateBuildStatus) : "failed",
+    status: buildStatusOf(responseBody.status),
     detail: typeof responseBody.detail === "string" ? responseBody.detail : "",
     plateFiles: stringMap(responseBody.plateFiles),
     staticFile: typeof responseBody.staticFile === "string" ? responseBody.staticFile : null,
     outlinesFile: typeof responseBody.outlinesFile === "string" ? responseBody.outlinesFile : null,
+    topologyStatus: buildStatusOf(responseBody.topologyStatus),
+    topologyDetail: typeof responseBody.topologyDetail === "string" ? responseBody.topologyDetail : "",
+    topologyFile: typeof responseBody.topologyFile === "string" ? responseBody.topologyFile : null,
   };
 }
 
@@ -139,4 +158,16 @@ export async function fetchStaticPolygons(staticFile: string): Promise<StaticPol
  */
 export async function fetchPlateOutlines(outlinesFile: string): Promise<PlateOutline[]> {
   return parsePlateOutlines(await fetchWorldLayer(outlinesFile));
+}
+
+/**
+ * Load and prepare the plate-topology model (plate polygons and boundary sections).
+ *
+ * Usage: first time a tectonic layer (boundaries, motion, subducting plates, events) is ticked.
+ *
+ * @returns The prepared model.
+ * @throws Error when the request fails or the body is not a topology model.
+ */
+export async function fetchPlateTopologies(): Promise<TopologyModel> {
+  return parseTopologyModel(await fetchJson("/plates/topologies"));
 }

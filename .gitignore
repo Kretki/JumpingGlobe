@@ -73,7 +73,7 @@ temp/
 
 #External heavy data
 public/data/lods*
-public/external
+public/external/cao_rot
 
 #Python runtime files
 *.pyc

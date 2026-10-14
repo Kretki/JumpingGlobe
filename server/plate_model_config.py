@@ -31,6 +31,9 @@ class PlateModelConfig:
         static_polygons: Static-polygon GPML/GPMLZ file (plate partition of the surface).
         max_age_ma: Oldest age offered to the client, in Ma (> 0).
         prep_script: Shell script that builds the derived layers.
+        topology_files: GPML files with the topological plate polygons and every
+            feature their sections reference (ridges, subduction zones, ...).
+        topology_script: Shell script that exports the topologies to JSON.
     """
 
     model_tag: str
@@ -39,6 +42,8 @@ class PlateModelConfig:
     static_polygons: Path
     max_age_ma: float
     prep_script: Path
+    topology_files: tuple[Path, ...] = ()
+    topology_script: Path | None = None
 
     @property
     def static_polygons_file(self) -> str:
@@ -63,6 +68,30 @@ class PlateModelConfig:
             File name inside dataDir, e.g. ``cao_plate_outlines.gpkg``.
         """
         return f"{self.model_tag}_plate_outlines{_GPKG_SUFFIX}"
+
+    @property
+    def topology_file(self) -> str:
+        """Name of the exported topology model (plate polygons and boundary sections).
+
+        Usage:
+            Reported as ``topologyFile`` by /api/plates/status; served by /api/plates/topologies.
+
+        Returns:
+            File name inside dataDir, e.g. ``cao_topologies.json``.
+        """
+        return f"{self.model_tag}_topologies.json"
+
+    @property
+    def topology_log_name(self) -> str:
+        """Name of the topology export's log file.
+
+        Usage:
+            Written next to the derived layers by TopologyLayerBuilder.
+
+        Returns:
+            File name inside dataDir, e.g. ``cao_topologies.log``.
+        """
+        return f"{self.model_tag}_topologies.log"
 
     @property
     def log_file_name(self) -> str:
@@ -123,7 +152,7 @@ def read_plate_model(model_section: Mapping[str, Any], project_root: Path) -> Pl
 
     Args:
         model_section: The ``plateModel`` mapping (tag, sourceDir, rotationFiles,
-            staticPolygons, maxAgeMa, prepScript).
+            staticPolygons, maxAgeMa, prepScript and optionally topologyFiles, topologyScript).
         project_root: Directory the relative paths are resolved against.
 
     Returns:
@@ -145,6 +174,10 @@ def read_plate_model(model_section: Mapping[str, Any], project_root: Path) -> Pl
     max_age_ma = float(model_section.get("maxAgeMa") or 0.0)
     if max_age_ma <= 0:
         raise ValueError("lod.json plateModel.maxAgeMa must be a positive age in Ma")
+    topology_names = [
+        plain_file_name(file_name, "topologyFiles") for file_name in model_section.get("topologyFiles") or []
+    ]
+    topology_script = model_section.get("topologyScript")
     return PlateModelConfig(
         model_tag=model_tag,
         source_directory=source_directory,
@@ -152,6 +185,8 @@ def read_plate_model(model_section: Mapping[str, Any], project_root: Path) -> Pl
         static_polygons=source_directory / plain_file_name(model_section.get("staticPolygons"), "staticPolygons"),
         max_age_ma=max_age_ma,
         prep_script=(project_root / str(model_section.get("prepScript") or "")).resolve(),
+        topology_files=tuple(source_directory / file_name for file_name in topology_names),
+        topology_script=(project_root / str(topology_script)).resolve() if topology_script else None,
     )
 
 

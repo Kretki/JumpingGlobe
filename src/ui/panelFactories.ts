@@ -3,8 +3,10 @@
 import { requireElement } from "./domLookup";
 import { LandProgressPanel } from "./landProgressPanel";
 import { PlateDisplayControls } from "./plateDisplayControls";
+import { PlateEventsPanel } from "./plateEventsPanel";
 import { PlateLabelLayer } from "./plateLabelLayer";
 import { SelectionPanel } from "./selectionPanel";
+import { TectonicLayerControls } from "./tectonicLayerControls";
 import { TimelineControl } from "./timelineControl";
 
 /**
@@ -101,4 +103,35 @@ export function createPlateDisplayControls(onChange: () => void): PlateDisplayCo
  */
 export function createPlateLabelLayer(): PlateLabelLayer {
   return new PlateLabelLayer(requireElement("plate-labels", HTMLDivElement));
+}
+
+/**
+ * Create the tectonic layer checkboxes.
+ *
+ * Usage: start-up.
+ *
+ * @param onChange - Called when any of them changes.
+ * @returns The controls.
+ */
+export function createTectonicLayerControls(onChange: () => void): TectonicLayerControls {
+  return new TectonicLayerControls(
+    {
+      boundariesCheckbox: requireElement("pl-boundaries", HTMLInputElement),
+      motionCheckbox: requireElement("pl-motion", HTMLInputElement),
+      subductingCheckbox: requireElement("pl-subducting", HTMLInputElement),
+      eventsCheckbox: requireElement("pl-events", HTMLInputElement),
+    },
+    onChange
+  );
+}
+
+/**
+ * Create the plate events list.
+ *
+ * Usage: start-up.
+ *
+ * @returns The panel.
+ */
+export function createPlateEventsPanel(): PlateEventsPanel {
+  return new PlateEventsPanel(requireElement("plate-events", HTMLUListElement));
 }

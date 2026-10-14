@@ -26,6 +26,10 @@ export class PlateLayerTracker {
   staticFile: string | null = null;
   /** Plate-outline file once the server has built it. */
   outlinesFile: string | null = null;
+  /** Plate-topology model file once the server has exported it. */
+  topologyFile: string | null = null;
+  topologyStatus = "loading";
+  topologyDetail = "";
 
   /**
    * Create the tracker.
@@ -61,7 +65,8 @@ export class PlateLayerTracker {
   }
 
   /**
-   * Follow the server's background build: world twin first (seconds), detail twins later.
+   * Follow the server's background builds: world twin first (seconds), detail twins later,
+   * and the plate-topology export alongside.
    *
    * Usage: started by loadRotationModel.
    *
@@ -77,6 +82,9 @@ export class PlateLayerTracker {
         this.plateFiles = statusResponse.plateFiles;
         this.staticFile = statusResponse.staticFile;
         this.outlinesFile = statusResponse.outlinesFile;
+        this.topologyFile = statusResponse.topologyFile;
+        this.topologyStatus = statusResponse.topologyStatus;
+        this.topologyDetail = statusResponse.topologyDetail;
       } catch (caughtError) {
         this.buildStatus = "failed";
         this.statusDetail = String(caughtError);
@@ -89,7 +97,7 @@ export class PlateLayerTracker {
         this.trackerListener.onWorldTwin(worldTwin);
       }
       this.trackerListener.onStatusChange();
-      if (this.buildStatus !== "building") return;
+      if (this.buildStatus !== "building" && this.topologyStatus !== "building") return;
       await new Promise((resolveWait) => window.setTimeout(resolveWait, POLL_INTERVAL_MS));
     }
   }

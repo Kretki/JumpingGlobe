@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from server.api_routes import RouteDependencies, build_api_router
+from server.api_routes import build_api_router
 from server.gpkg_store import GeoPackageStore
 from server.land_queries import LandQueryEngine
 from server.lod_config import DATA_DIR, FULL_RESOLUTION_FILE, PROJECT_ROOT, WORLD_FILE
@@ -36,6 +36,9 @@ from server.plate_layers import PlateLayerBuilder
 from server.plate_model_config import PLATE_MODEL
 from server.response_services import LandService
 from server.rotation_service import RotationService
+from server.route_support import RouteDependencies
+from server.topology_layer import TopologyLayerBuilder, default_topology_paths
+from server.topology_service import TopologyFileService
 
 DEFAULT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 DEFAULT_BIND_HOST = "127.0.0.1"
@@ -88,10 +91,11 @@ def create_application() -> FastAPI:
     rotation_service = RotationService(PLATE_MODEL.rotation_files, PLATE_MODEL.max_age_ma)
     land_service = LandService(gpkg_store, LandQueryEngine(gpkg_store), rotation_service)
     plate_builder = PlateLayerBuilder(default_plate_layer_paths(), on_rebuilt=land_service.clear_caches)
+    topology_builder = TopologyLayerBuilder(default_topology_paths())
 
     @asynccontextmanager
     async def application_lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        """Start the background plate-layer build on startup (non-blocking).
+        """Start the background plate-layer and topology builds on startup (non-blocking).
 
         Usage:
             Passed to FastAPI as ``lifespan``.
@@ -103,6 +107,7 @@ def create_application() -> FastAPI:
             Async iterator yielding once while the app runs.
         """
         plate_builder.ensure_built()
+        topology_builder.ensure_built()
         yield
 
     web_application = FastAPI(title="Land GPKG API", version="1.0.0", lifespan=application_lifespan)
@@ -119,6 +124,8 @@ def create_application() -> FastAPI:
                 land_responder=land_service,
                 rotation_responder=rotation_service,
                 plate_status=plate_builder,
+                topology_status=topology_builder,
+                topology_responder=TopologyFileService(topology_builder.topology_path),
                 world_file=WORLD_FILE,
                 data_directory_label=project_relative(DATA_DIR),
                 full_resolution_path=DATA_DIR / FULL_RESOLUTION_FILE,

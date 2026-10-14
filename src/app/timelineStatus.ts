@@ -11,7 +11,7 @@ export type TimelineStatusInput = {
   statusDetail: string;
   plateFiles: Record<string, string>;
   hiddenPlateGroups: number;
-  /** Why plate outlines are not shown yet ("" when fine or not requested). */
+  /** Why plate outlines or tectonic layers are not shown yet ("" when fine or not requested). */
   outlinesNote: string;
   ageInMyr: number;
   cameraHeightM: number;

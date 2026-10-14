@@ -1,13 +1,13 @@
 /**
  * Plate outlines on demand: loads the outline layer the first time the user ticks
- * "Plate outlines", moves it with the plates whenever the age changes, and places
- * the plate names each frame while "Plate names" is ticked.
+ * "Plate outlines", moves it with the plates whenever the age changes, and provides
+ * the plate names (for the label board) while "Plate names" is ticked.
  */
 
 import { outlineBufferLength, reconstructOutlines, type PlateLabel } from "../plates/outlineReconstruction";
 import type { PlateOutline } from "../plates/plateOutlines";
 import type { RotationTree } from "../plates/rotationTree";
-import { placeLabels, type LabelView, type PlacedLabel } from "../rendering/labelPlacement";
+import type { LabelRequest } from "../rendering/labelPlacement";
 import type { PlateDisplayChoice } from "../ui/plateDisplayControls";
 import type { AgeSource } from "../ui/timelineControl";
 
@@ -22,18 +22,11 @@ export interface OutlineLineSink {
   uploadLines(linePositions: Float32Array, vertexCount: number): void;
 }
 
-/** Shows plate names (PlateLabelLayer). */
-export interface PlateLabelSink {
-  renderLabels(placedLabels: PlacedLabel[]): void;
-  hideLabels(): void;
-}
-
 export type PlateOutlineDeps = {
   outlineSource: OutlineSource;
   ageSource: AgeSource;
   displayChoice: PlateDisplayChoice;
   lineSink: OutlineLineSink;
-  labelSink: PlateLabelSink;
   /** Fetches and prepares an outline file (fetchPlateOutlines). */
   loadOutlines: (outlinesFile: string) => Promise<PlateOutline[]>;
   /** Called when statusNote may have changed. */
@@ -52,8 +45,8 @@ export class PlateOutlineController {
   /**
    * Create the controller (nothing is loaded until outlines are requested).
    *
-   * Usage: once at start-up; call handleDisplayChange() from the checkboxes and
-   * updateFrame() every frame.
+   * Usage: once at start-up; call handleDisplayChange() from the checkboxes,
+   * updateFrame() every frame and register it with the label board.
    *
    * @param outlineDeps - Collaborators.
    */
@@ -91,9 +84,7 @@ export class PlateOutlineController {
    * @returns Nothing.
    */
   handleDisplayChange(): void {
-    const displayChoice = this.outlineDeps.displayChoice;
-    if (!displayChoice.showOutlines) this.loadFailed = false;
-    if (!displayChoice.showNames) this.outlineDeps.labelSink.hideLabels();
+    if (!this.outlineDeps.displayChoice.showOutlines) this.loadFailed = false;
     this.outlineDeps.onStatusChange();
   }
 
@@ -145,20 +136,28 @@ export class PlateOutlineController {
   }
 
   /**
-   * Per-frame update: load on demand, follow the age, place the names.
+   * Per-frame update: load on demand and follow the age.
    *
    * Usage: frame loop, before drawing.
    *
-   * @param labelView - Camera and viewport of this frame.
    * @returns Nothing.
    */
-  updateFrame(labelView: LabelView): void {
-    const displayChoice = this.outlineDeps.displayChoice;
-    if (!displayChoice.showOutlines) return;
+  updateFrame(): void {
+    if (!this.outlineDeps.displayChoice.showOutlines) return;
     this.ensureLoaded();
     const rotationTree = this.outlineDeps.outlineSource.rotationTree;
     if (!this.outlineList || !rotationTree) return;
     this.reconstructIfStale(this.outlineList, rotationTree);
-    if (displayChoice.showNames) this.outlineDeps.labelSink.renderLabels(placeLabels(this.plateLabels, labelView));
+  }
+
+  /**
+   * Plate names to show this frame.
+   *
+   * Usage: label board (LabelProvider).
+   *
+   * @returns One label per plate, largest first, or [] while names are off or outlines not loaded.
+   */
+  labelRequests(): LabelRequest[] {
+    return this.isShowing && this.outlineDeps.displayChoice.showNames ? this.plateLabels : [];
   }
 }
