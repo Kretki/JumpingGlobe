@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from server.lod_config import LOD_CONFIG, PROJECT_ROOT
+from server.configuration.lod_config import LOD_CONFIG, PROJECT_ROOT
 
 _MODEL_TAG_PATTERN = re.compile(r"^[a-z0-9_]{1,32}$")
 _GPKG_SUFFIX = ".gpkg"

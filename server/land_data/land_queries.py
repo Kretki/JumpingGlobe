@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Protocol
 
-from server.geometry_decoder import gpkg_blob_to_geojson
-from server.gpkg_store import GeoPackageStore
-from server.quaternion_math import Quaternion, lonlat_to_unit, quat_conjugate, quat_rotate, unit_to_lonlat
-from server.spherical_geometry import BoundingBox, boxes_intersect, cap_bbox, split_antimeridian
+from server.land_data.geometry_decoder import gpkg_blob_to_geojson
+from server.land_data.gpkg_store import GeoPackageStore
+from server.shared_utils.quaternion_math import Quaternion, lonlat_to_unit, quat_conjugate, quat_rotate, unit_to_lonlat
+from server.shared_utils.spherical_geometry import BoundingBox, boxes_intersect, cap_bbox, split_antimeridian
 
 MAX_FEATURE_LIMIT = 100_000
 DISTANT_PAST_MA = 1e6
@@ -62,7 +62,7 @@ BoxResultRow = tuple[int, bytes, dict[str, Any]]
 
 
 class RotationSource(Protocol):
-    """Anything that can give a plate's total rotation at an age (see server.rotation_tree.RotationTree)."""
+    """Anything that can give a plate's total rotation at an age (see server.plate_model.rotation_tree.RotationTree)."""
 
     def total_rotation(
         self, plate_id: int, age_in_ma: float, rotation_memo: dict[int, Quaternion | None] | None = None

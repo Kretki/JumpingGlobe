@@ -22,6 +22,10 @@ httptools==0.9.0
     # via uvicorn
 idna==3.20
     # via anyio
+polars==2.0.0
+    # via jumping-globe
+polars-runtime-32==2.0.0
+    # via polars
 pydantic==2.14.1
     # via fastapi
 pydantic-core==2.50.1

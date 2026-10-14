@@ -20,11 +20,16 @@
   },
   "paleoMagnetics": {
     "sourceDir": "public/external",
-    "poleFiles": [
-      { "file": "paleomagnetic_poles/south_china_phanerozoic_poles.csv", "block": "South China" },
-      { "file": "paleomagnetic_poles/south_china_neoproterozoic_poles.csv", "block": "South China" },
-      { "file": "paleomagnetic_poles/rodinia_850_810_poles.csv" }
-    ],
+    "pintFile": "paleomagnetic_poles/PINTv820.csv",
+    "pintSites": {
+      "minWindowMyr": 0.1,
+      "maxWindowMyr": 20,
+      "clusterRadiusDeg": 30,
+      "maxFieldSources": 6,
+      "minPoleShare": 0.04,
+      "minSourceShare": 0.08,
+      "magnetDepth": 0.85
+    },
     "tpwWorkbook": {
       "file": "tpw/input_APWP.xlsx",
       "pathSheet": "TPWPs",
@@ -43,29 +48,6 @@
       "rateHighColumn": "PW_rate_high"
     },
     "tpwNetAngleFile": "tpw/rates_T14.csv",
-    "blockPlateIds": { "South China": 602, "Laurentia": 101, "Baltica": 302, "East Svalbard": 311, "West Africa": 714 },
-    "namedAgesMa": {
-      "Cenozoic": [0, 66.0],
-      "Late Cretaceous": [66.0, 100.5],
-      "Early Cretaceous": [100.5, 145.0],
-      "Late Jurassic": [145.0, 161.5],
-      "Middle Jurassic": [161.5, 174.7],
-      "Early Jurassic": [174.7, 201.4],
-      "Late Triassic": [201.4, 237.0],
-      "Middle Triassic": [237.0, 247.2],
-      "Early Triassic": [247.2, 251.9],
-      "Permian - Guadalupian & Lopingian": [251.9, 273.0],
-      "Permian - Cisuralian": [273.0, 298.9],
-      "Carboniferous - Mississippian": [323.2, 358.9],
-      "Late Devonian": [358.9, 382.7],
-      "Middle Devonian - Givetian": [382.7, 387.7],
-      "Early & Middle Devonian": [382.7, 419.2],
-      "Siurian - Wenlock & Ludlow": [423.0, 433.4],
-      "Middle & Late Ordovician": [443.8, 470.0],
-      "Early Ordovician": [470.0, 485.4],
-      "Cambrian - Series 2": [509.0, 521.0]
-    },
-    "minAgeWindowMyr": 2,
     "gridGroundHeightM": 2500000,
     "gridLiftFraction": 0.05
   },

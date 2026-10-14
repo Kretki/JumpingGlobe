@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from server.rotation_tree import RotationTree
-from server.spherical_geometry import BoundingBox
+from server.plate_model.rotation_tree import RotationTree
+from server.shared_utils.spherical_geometry import BoundingBox
 
 
 class LandResponder(Protocol):

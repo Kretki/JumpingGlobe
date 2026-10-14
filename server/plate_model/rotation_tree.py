@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from server.quaternion_math import IDENTITY_QUATERNION, Quaternion, quat_from_pole, quat_multiply, quat_slerp
+from server.shared_utils.quaternion_math import (
+    IDENTITY_QUATERNION,
+    Quaternion,
+    quat_from_pole,
+    quat_multiply,
+    quat_slerp,
+)
 
 _MAX_CHAIN_DEPTH = 64
 

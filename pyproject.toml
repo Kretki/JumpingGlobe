@@ -5,6 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "defusedxml>=0.7.1,<0.8",
     "fastapi>=0.110.0",
+    "polars>=2.0,<3",
     "uvicorn[standard]>=0.27.0",
 ]
 

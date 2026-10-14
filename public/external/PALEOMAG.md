@@ -4,9 +4,10 @@ The "Paleomagnetism" group of the layers panel draws data from two folders under
 `public/external/`:
 - `tpw/` holds the TPW data (Vaes et al. 2023 GAPWAP supplement, plus Torsvik et al.
   2014 rates).
-- `paleomagnetic_poles/` holds the paleomagnetic poles.
+- `paleomagnetic_poles/PINTv820.csv` is the PINT paleointensity database (v8.2). It is
+  the only source of the magnetic layers.
 
-The server reads the files directly; no prep script is needed. They are configured in
+The server reads the files directly (the CSVs with polars); no prep script is needed. They are configured in
 the `paleoMagnetics` section of `lod.json` and served as one JSON document by
 `GET /api/paleomag`. Sources are listed in `ARTICLES.md`.
 
@@ -14,8 +15,9 @@ the `paleoMagnetics` section of `lod.json` and served as one JSON document by
 |-------|------|------------|
 | TPW poles (rods, path, 95 % circle) | `tpw/input_APWP.xlsx`, sheet `TPWPs` | the age lies on the chosen path: M22 covers 0–320 Ma; D12, T08, M93 and the published D12 TPW path cover 0–120 Ma |
 | TPW latitude / longitude grid | same | same |
-| Magnetic poles | `paleomagnetic_poles/*.csv` | the age lies in a pole's age window |
+| Magnetic poles (poles, their strength and scatter, site VGPs) | `paleomagnetic_poles/PINTv820.csv` | a PINT site with a field direction lies within ≈ 2.5 σ of the age |
 | Magnetic field lines (1–3 layers) | same | same |
+| Field-strength chart | same | always (all sites with a dipole moment, marker at the displayed age) |
 
 A checkbox whose data does not cover the displayed age is greyed out but keeps its
 state. The "Path" dropdown chooses the mantle reference frame of the TPW path.
@@ -27,9 +29,7 @@ state. The "Path" dropdown chooses the mantle reference frame of the TPW path.
 | `tpw/input_APWP.xlsx`, sheet `TPWPs` | TPW paths: spin-axis pole (lon, lat) every 10 Myr in five mantle reference frames, with the 95 % confidence radius `P95`. |
 | `tpw/input_APWP.xlsx`, sheet `V23_int` | Polar-wander rate with its lower and upper bound, every 10 Myr (note under the TPW checkboxes). |
 | `tpw/rates_T14.csv` | Torsvik et al. 2014 TPW rate and net TPW angle, 0–320 Ma (same note). |
-| `paleomagnetic_poles/south_china_phanerozoic_poles.csv` | South China poles, Cenozoic to Cambrian (dated by period names). |
-| `paleomagnetic_poles/south_china_neoproterozoic_poles.csv` | South China poles, 832–560 Ma. |
-| `paleomagnetic_poles/rodinia_850_810_poles.csv` | East Svalbard, Baltica and West Africa poles, ~860–810 Ma. |
+| `paleomagnetic_poles/PINTv820.csv` | Site location, age ± error, polarity, field direction (INC, DEC) and dipole moment (VDM / VADM). |
 
 ## Files the program does not use
 
@@ -37,7 +37,7 @@ state. The "Path" dropdown chooses the mantle reference frame of the TPW path.
 |------|-----|
 | `tpw/GAPWAP_plate_circuit_{D12,M22,M93,T08}.rot` | Relative plate circuits (Africa fixed) that the GAPWAP and the TPW paths were computed with. The paths are already in the workbook, and the globe positions plates with the Cao model. |
 | `tpw/input_APWP.xlsx`, sheets `V23`, `V23_int_5`, `PWPs` | The global APWP (south poles in African coordinates) at the raw, 10 Myr and 5 Myr steps, and the polar-wander paths of each frame. Only the TPW paths and the 10 Myr rates are drawn. |
-| `paleomagnetic_poles/fanjingshan_sites_vgps.csv` | Site-level VGPs; their mean is the FJS pole already listed in `south_china_neoproterozoic_poles.csv`. |
+| `paleomagnetic_poles/fanjingshan_sites_vgps.csv`, `rodinia_850_810_poles.csv`, `south_china_neoproterozoic_poles.csv`, `south_china_phanerozoic_poles.csv` | Earlier pole tables; the magnetic layers now use PINT only. They can be deleted. |
 
 ## How the data is placed on the globe
 
@@ -66,21 +66,44 @@ state. The "Path" dropdown chooses the mantle reference frame of the TPW path.
   - the Torsvik et al. 2014 rate and net TPW angle.
 
   All three values are interpolated linearly between samples; empty cells are skipped.
-- **Plates of paleomagnetic poles.** `paleoMagnetics.blockPlateIds` maps the block names
-  of the pole tables to Cao plate ids: South China 602, Laurentia 101, Baltica 302,
-  East Svalbard 311 and West Africa 714. Poles move with their block's plate at the
-  displayed age.
-- **Magnetic poles.** The tabulated pole is drawn as the north pole (red), and its
-  antipode as the south pole (blue). Each pole's 95 % confidence circle is drawn too;
-  for a dp/dm ellipse, the larger axis is used.
-- **Field lines.** The lines are drawn as the field of a bar magnet whose axis is the
-  mean of the poles shown at that age. The magnet is a north and a south magnetic
-  charge, 0.85 Earth radii from the centre (`magnetProfile.ts`).
-  - The lines leave the ground in tubes around the poles; the tube mouths are
-    outlined on the ground.
-  - Each layer holds 24 lines, and the layers reach out to 1.6, 2.4 and 3.4 Earth
-    radii.
-  - The lines shade from red to blue and carry an arrow at their apex (north → south).
+- **Magnetic field.** Everything comes from PINT, in four steps (settings in
+  `lod.json` `paleoMagnetics.pintSites`).
+  1. *Sites → VGPs.* Each site's field direction gives its virtual geomagnetic pole
+     (VGP), computed on the server with polars. 3194 of the 4680 usable sites have a
+     direction.
+     - The server assigns every site to the Cao plate under it, using the static
+       polygons and preferring the polygon that existed at the site's age.
+     - The browser moves the VGP with that plate to the displayed age.
+  2. *Age window.* A site counts at the displayed age by a Gaussian of its age
+     difference, with σ = its age error, kept within `minWindowMyr`..`maxWindowMyr`.
+     - Sites further than about 2.5 σ are left out.
+     - The weight is divided by σ, so loosely dated sites count less.
+     - Within a window, VGPs of different polarity appear together. That is how
+       reversals and excursions show.
+  3. *Poles.* The weighted VGPs are grouped: sites within `clusterRadiusDeg` (30°) of a
+     group's mean join it, and groups whose means come that close are merged.
+     - Groups holding at least `minPoleShare` of the weight are poles. A stable field
+       gives one pole; reversals and excursions give two or more, for example a normal,
+       a reversed and an equatorial pole around 2.6 Ma.
+     - A pole's strength is the weighted mean dipole moment of its sites, in 10²² A·m².
+       When none of its sites has a moment, the window mean is used (labelled "est.").
+     - Each pole is drawn as a ring at its north end (red) and its antipode (blue),
+       sized by its moment. A fainter circle shows the scatter of its VGPs, and every
+       site VGP is a small cross coloured by polarity (N red, R blue, T yellow).
+  4. *Field lines.* Every pole with at least `minSourceShare` of the weight (at most
+     `maxFieldSources`) becomes a buried bar magnet. This is a negative magnetic charge
+     under its north pole and a positive one under its south pole, `magnetDepth` (0.85)
+     Earth radii from the centre, sized by share × moment.
+     - The field is the sum over all charges, so several poles give a multipolar field.
+     - Lines start in tubes of 30°, 18° and 12° (layers 1–3) around each positive
+       charge. Each layer has 24 lines, shared out by source strength.
+     - Lines are traced in 3D (Runge–Kutta) until they reach the ground again, or
+       5 Earth radii. They are drawn from blue (field leaving, geomagnetic south) to red
+       (field entering, geomagnetic north), with the arrow pointing along the field, as
+       in today's field.
+  - The chart under the checkboxes plots every site's moment against age (log scale)
+    with a running median. Its marker shows the displayed age and the window's mean
+    moment.
 
 ## Adding TPW paths
 
@@ -93,14 +116,3 @@ To add a path from the same workbook layout, add an entry to
 
 The first entry is the dropdown's default. Sheet and column names (`pathSheet`,
 `ageColumn`, `confidenceColumn`, `rateSheet`, `rateColumn`, ...) are configurable too.
-
-## Ages of paleomagnetic poles
-
-- Ranges (`~820–810`, `~590 to 560`), uncertainties (`799.5 ± 8.4`) and combined
-  determinations (`848 ± 27/834 ± 9`, `857.2 ± 8.5 & 855 ± 16`) become one age window
-  covering all of them.
-- Period names (`Late Cretaceous`, `Cambrian - Series 2`, ...) are looked up in
-  `paleoMagnetics.namedAgesMa`. Those ages follow the ICS chart; edit the table to use
-  other boundaries.
-- Windows narrower than `minAgeWindowMyr` (2 Myr) are widened around their middle, so
-  that poles dated to ±0.2 Myr still show on the 1 Myr timeline.

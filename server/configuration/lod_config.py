@@ -1,6 +1,6 @@
 """Shared LOD paths read from lod.json (the same file the TypeScript client imports).
 
-The plate-model section of lod.json is read by server/plate_model_config.py.
+The plate-model section of lod.json is read by server/configuration/plate_model_config.py.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "lod.json"
 
 

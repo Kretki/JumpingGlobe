@@ -1,15 +1,15 @@
-"""Cached, JSON-encoded responses for land queries (the rotation model is served by server/rotation_service.py)."""
+"""Cached, JSON-encoded land query responses (the rotation model is served by plate_model/rotation_service.py)."""
 
 from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any
 
-from server.gpkg_store import GeoPackageStore
-from server.json_encoding import encode_compact_json
-from server.land_queries import LandQueryEngine
-from server.service_contracts import RotationTreeSource
-from server.spherical_geometry import BoundingBox
+from server.land_data.gpkg_store import GeoPackageStore
+from server.shared_utils.json_encoding import encode_compact_json
+from server.land_data.land_queries import LandQueryEngine
+from server.contracts.service_contracts import RotationTreeSource
+from server.shared_utils.spherical_geometry import BoundingBox
 
 LAND_CACHE_SIZE = 32
 PAST_CACHE_SIZE = 16

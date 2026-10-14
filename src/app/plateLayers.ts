@@ -13,6 +13,7 @@ import { PlateOutlineOverlay } from "../rendering/plateOutlineOverlay";
 import { SpaceLineOverlay } from "../rendering/spaceLineOverlay";
 import { TectonicOverlay } from "../rendering/tectonicOverlay";
 import {
+  createFieldStrengthChart,
   createPaleoLayerControls,
   createPlateDisplayControls,
   createPlateEventsPanel,
@@ -30,6 +31,7 @@ import { TectonicsController } from "./tectonicsController";
 export interface PlateLayerSource {
   readonly rotationTree: RotationTree | null;
   readonly outlinesFile: string | null;
+  readonly staticFile: string | null;
   readonly topologyFile: string | null;
   readonly topologyStatus: string;
   readonly topologyDetail: string;
@@ -79,6 +81,7 @@ function createPaleoLayers(
     layerChoice: paleoControls,
     availabilitySink: paleoControls,
     lineSink: paleoOverlay,
+    strengthSink: createFieldStrengthChart(),
     loadData: fetchPaleoMagData,
     onStatusChange,
   });

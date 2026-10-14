@@ -3,8 +3,9 @@
 import type { LabelRequest } from "../rendering/labelPlacement";
 import { addFieldLines } from "./fieldLines";
 import { buildGraticule } from "./paleoGraticule";
-import { addMagneticPoles, addSpinAxisRods, addTpwTrack } from "./poleMarkers";
-import { meanPoleAxis, type PlacedPole } from "./poleSelection";
+import { addMagneticPoles, addSiteVgps } from "./magneticMarkers";
+import type { MagneticField } from "./magneticField";
+import { addSpinAxisRods, addTpwTrack } from "./poleMarkers";
 import { SpaceLineSet } from "./spaceLineSet";
 import type { TpwFrame } from "./tpwPaths";
 
@@ -37,8 +38,8 @@ export type PaleoScene = {
 export type PaleoSceneInput = {
   /** Spin axis of the chosen TPW path at the displayed age, or null without TPW data. */
   tpwFrame: TpwFrame | null;
-  /** Paleomagnetic poles of the displayed age (empty without data). */
-  placedPoles: PlacedPole[];
+  /** Geomagnetic field of the displayed age (from the PINT sites), or null without data. */
+  magneticField: MagneticField | null;
   layerChoice: PaleoLayerChoice;
 };
 
@@ -52,7 +53,7 @@ export type PaleoSceneInput = {
  * @returns Non-empty line groups and the labels.
  */
 export function buildPaleoScene(sceneInput: PaleoSceneInput): PaleoScene {
-  const { tpwFrame, placedPoles, layerChoice } = sceneInput;
+  const { tpwFrame, magneticField, layerChoice } = sceneInput;
   const paleoScene: PaleoScene = { lineGroups: new Map(), gridLabels: [], fixedLabels: [] };
   const groundMarks = new SpaceLineSet();
   const spaceLines = new SpaceLineSet();
@@ -65,9 +66,12 @@ export function buildPaleoScene(sceneInput: PaleoSceneInput): PaleoScene {
     addSpinAxisRods(spaceLines, tpwFrame, paleoScene.fixedLabels);
     addTpwTrack(groundMarks, tpwFrame);
   }
-  if (placedPoles.length && layerChoice.showMagneticPoles) addMagneticPoles(groundMarks, placedPoles, paleoScene.fixedLabels);
-  const dipoleAxis = layerChoice.showFieldLines ? meanPoleAxis(placedPoles) : null;
-  if (dipoleAxis) addFieldLines(spaceLines, dipoleAxis, layerChoice.fieldShellCount, paleoScene.fixedLabels);
+  const hasPoles = magneticField !== null && magneticField.magneticPoles.length > 0;
+  if (hasPoles && layerChoice.showMagneticPoles) {
+    addSiteVgps(groundMarks, magneticField.windowSites);
+    addMagneticPoles(groundMarks, magneticField.magneticPoles, paleoScene.fixedLabels);
+  }
+  if (hasPoles && layerChoice.showFieldLines) addFieldLines(spaceLines, magneticField.fieldCharges, layerChoice.fieldShellCount);
   if (groundMarks.vertexCount) paleoScene.lineGroups.set("groundMarks", groundMarks);
   if (spaceLines.vertexCount) paleoScene.lineGroups.set("spaceLines", spaceLines);
   return paleoScene;

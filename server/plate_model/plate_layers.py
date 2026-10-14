@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from server.build_utils import (
+from server.shared_utils.build_utils import (
     STATUS_BUILDING,
     STATUS_FAILED,
     STATUS_READY,
@@ -25,7 +25,7 @@ from server.build_utils import (
     modified_time,
     run_logged_script,
 )
-from server.plate_layer_paths import PlateLayerPaths
+from server.plate_model.plate_layer_paths import PlateLayerPaths
 
 
 class PlateLayerBuilder:
@@ -107,6 +107,18 @@ class PlateLayerBuilder:
             The file name, or None while it is missing or stale.
         """
         return self._fresh_shared_file(self._layer_paths.static_file)
+
+    def static_path(self) -> Path | None:
+        """Return the path of the static-polygon file when it is up to date.
+
+        Usage:
+            Plate lookup of paleomagnetic sites (PaleoMagService).
+
+        Returns:
+            Absolute path inside the data directory, or None while it is missing or stale.
+        """
+        static_name = self.static_file()
+        return self._layer_paths.data_directory / static_name if static_name else None
 
     def outlines_file(self) -> str | None:
         """Return the plate-outline file name when it is up to date.

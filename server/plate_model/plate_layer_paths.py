@@ -6,8 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from server.lod_config import BAND_FILES, DATA_DIR, PROJECT_ROOT
-from server.plate_model_config import PLATE_MODEL
+from server.configuration.lod_config import BAND_FILES, DATA_DIR, PROJECT_ROOT
+from server.configuration.plate_model_config import PLATE_MODEL
 
 
 @dataclass(frozen=True)

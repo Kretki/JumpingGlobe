@@ -1,10 +1,9 @@
-/** Markers of poles: the TPW spin axis (grey rods out of the globe, path and confidence circle) and paleomagnetic north/south poles. */
+/** TPW pole markers (grey rods out of the globe, path and confidence circle) and the pole colours and ground circles shared with the magnetic markers. */
 
 import type { UnitVector } from "../plates/sphericalCoords";
 import type { LabelRequest } from "../rendering/labelPlacement";
 import { pointAlongArc } from "../plates/unitVectorMath";
 import { smallCircle } from "./axisBasis";
-import type { PlacedPole } from "./poleSelection";
 import { groundPoint, spacePoint, type LineColor, type SpaceLineSet } from "./spaceLineSet";
 import type { TpwFrame } from "./tpwPaths";
 
@@ -17,9 +16,8 @@ const TRACK_SUBDIVISIONS = 8;
 export const NORTH_POLE_COLOR: LineColor = [0.95, 0.22, 0.2, 1];
 export const SOUTH_POLE_COLOR: LineColor = [0.25, 0.48, 1.0, 1];
 const MARKER_RADIUS_DEG = 1.2;
-const MARKER_SAMPLES = 24;
+export const MARKER_SAMPLES = 24;
 const CONFIDENCE_SAMPLES = 72;
-const CONFIDENCE_ALPHA = 0.55;
 
 /**
  * Opposite direction.
@@ -45,7 +43,7 @@ export function antipodeOf(inputUnit: UnitVector): UnitVector {
  * @param lineColor - Colour.
  * @returns Nothing.
  */
-function addGroundCircle(spaceLineSet: SpaceLineSet, centerUnit: UnitVector, radiusDeg: number, sampleCount: number, lineColor: LineColor): void {
+export function addGroundCircle(spaceLineSet: SpaceLineSet, centerUnit: UnitVector, radiusDeg: number, sampleCount: number, lineColor: LineColor): void {
   spaceLineSet.addPolyline(smallCircle(centerUnit, radiusDeg, sampleCount).map(groundPoint), lineColor);
 }
 
@@ -89,48 +87,5 @@ export function addTpwTrack(spaceLineSet: SpaceLineSet, tpwFrame: TpwFrame): voi
     const poleUnit = hemisphereSign > 0 ? tpwFrame.spinAxisUnit : antipodeOf(tpwFrame.spinAxisUnit);
     addGroundCircle(spaceLineSet, poleUnit, MARKER_RADIUS_DEG, MARKER_SAMPLES, SPIN_ROD_COLOR);
     if (tpwFrame.confidenceDeg) addGroundCircle(spaceLineSet, poleUnit, tpwFrame.confidenceDeg, CONFIDENCE_SAMPLES, TRACK_COLOR);
-  }
-}
-
-/**
- * Add a marker (ring and cross) with its 95 % confidence circle.
- *
- * Usage: addMagneticPoles, per pole end.
- *
- * @param spaceLineSet - Output (ground level).
- * @param centerUnit - Pole position.
- * @param confidenceDeg - Confidence radius, or null.
- * @param markerColor - Colour.
- * @returns Nothing.
- */
-function addPoleMarker(spaceLineSet: SpaceLineSet, centerUnit: UnitVector, confidenceDeg: number | null, markerColor: LineColor): void {
-  const ringUnits = smallCircle(centerUnit, MARKER_RADIUS_DEG, MARKER_SAMPLES);
-  spaceLineSet.addPolyline(ringUnits.map(groundPoint), markerColor);
-  const quarterStep = MARKER_SAMPLES / 4;
-  spaceLineSet.addSegment(groundPoint(ringUnits[0]), groundPoint(ringUnits[2 * quarterStep]), markerColor);
-  spaceLineSet.addSegment(groundPoint(ringUnits[quarterStep]), groundPoint(ringUnits[3 * quarterStep]), markerColor);
-  if (confidenceDeg !== null) {
-    addGroundCircle(spaceLineSet, centerUnit, confidenceDeg, CONFIDENCE_SAMPLES, [markerColor[0], markerColor[1], markerColor[2], CONFIDENCE_ALPHA]);
-  }
-}
-
-/**
- * Add north (red) and south (blue) paleomagnetic pole markers with their labels.
- *
- * Usage: "Magnetic poles" layer. The south pole is the antipode of the tabulated pole.
- *
- * @param spaceLineSet - Output (ground level).
- * @param placedPoles - Poles of the displayed age.
- * @param labelRequests - Labels (mutated).
- * @returns Nothing.
- */
-export function addMagneticPoles(spaceLineSet: SpaceLineSet, placedPoles: PlacedPole[], labelRequests: LabelRequest[]): void {
-  for (const { paleoPole, northUnit } of placedPoles) {
-    const southUnit = antipodeOf(northUnit);
-    addPoleMarker(spaceLineSet, northUnit, paleoPole.confidenceDeg, NORTH_POLE_COLOR);
-    addPoleMarker(spaceLineSet, southUnit, paleoPole.confidenceDeg, SOUTH_POLE_COLOR);
-    const poleTitle = `${paleoPole.poleName} · ${paleoPole.block}`;
-    labelRequests.push({ labelText: `N ${poleTitle}`, labelUnit: northUnit, labelStyle: "magneticNorth" });
-    labelRequests.push({ labelText: `S ${poleTitle}`, labelUnit: southUnit, labelStyle: "magneticSouth" });
   }
 }

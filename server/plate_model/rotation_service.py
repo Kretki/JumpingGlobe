@@ -7,9 +7,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from server.json_encoding import encode_compact_json
-from server.rotation_parser import parse_rotation_files
-from server.rotation_tree import RotationTree
+from server.shared_utils.json_encoding import encode_compact_json
+from server.plate_model.rotation_parser import parse_rotation_files
+from server.plate_model.rotation_tree import RotationTree
 
 FileVersions = tuple[int, ...]
 """``st_mtime_ns`` of every rotation file, in load order (cache key)."""

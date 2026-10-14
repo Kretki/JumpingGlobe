@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 
-from server.route_support import RouteDependencies, json_response
+from server.http_api.route_support import RouteDependencies, json_response
 
 
 def register_status_routes(api_router: APIRouter, dependencies: RouteDependencies) -> None:

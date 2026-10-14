@@ -1,6 +1,7 @@
 /** Build the UI components from their DOM elements in index.html (fail-fast lookups). */
 
 import { requireElement } from "./domLookup";
+import { FieldStrengthChart } from "./fieldStrengthChart";
 import { LandProgressPanel } from "./landProgressPanel";
 import { PaleoLayerControls } from "./paleoLayerControls";
 import { PlateDisplayControls } from "./plateDisplayControls";
@@ -159,4 +160,15 @@ export function createPaleoLayerControls(onChange: () => void): PaleoLayerContro
     },
     onChange
   );
+}
+
+/**
+ * Create the field-strength chart.
+ *
+ * Usage: start-up.
+ *
+ * @returns The chart.
+ */
+export function createFieldStrengthChart(): FieldStrengthChart {
+  return new FieldStrengthChart(requireElement("pm-strength-chart", HTMLCanvasElement));
 }

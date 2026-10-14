@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from server.spherical_geometry import BoundingBox
+from server.shared_utils.spherical_geometry import BoundingBox
 
 _BBOX_PARTS = 4
 

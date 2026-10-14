@@ -1,23 +1,16 @@
 /**
- * Self-check for the paleomagnetic layers: data validation, TPW paths, pole placement,
- * the TPW grid, dipole field lines, grid lift and scene assembly.
+ * Self-check for the TPW layers: data validation, TPW paths and rates, the TPW grid,
+ * grid lift and scene assembly (the magnetic field is checked in magneticField.test.ts).
  * Run: npm run test:paleomag
  */
 
-import { WGS84_SEMI_MAJOR } from "../geodesy/wgs84Ellipsoid";
 import { quatFromPole, quatRotate } from "../plates/quaternionMath";
-import { RotationTree } from "../plates/rotationTree";
 import { unitToLonLat, type UnitVector } from "../plates/sphericalCoords";
-import { RotationCache } from "../plates/topology/rotationCache";
 import { dotProduct } from "../plates/unitVectorMath";
-import { FIELD_SHELL_RADII, LINES_PER_SHELL, SAMPLES_PER_LINE, addFieldLines } from "./fieldLines";
 import { GRID_GROUND_HEIGHT_M, gridLiftScale } from "./gridLift";
-import { profileForApex } from "./magnetProfile";
 import { buildGraticule, latitudeText, longitudeText } from "./paleoGraticule";
 import { parsePaleoMagData } from "./paleomagModel";
 import { buildPaleoScene, type PaleoLayerChoice } from "./paleoScene";
-import { meanPoleAxis, polesAtAge } from "./poleSelection";
-import { SpaceLineSet } from "./spaceLineSet";
 import { interpolateSeries, rotateUnit, TpwPaths, tpwRateNote } from "./tpwPaths";
 
 /**
@@ -35,33 +28,9 @@ function assertCheck(condition: boolean, checkName: string): void {
   console.log("ok:", checkName);
 }
 
-/**
- * Length of an ECEF vector in Earth radii.
- *
- * Usage: field-line checks.
- *
- * @param positionValues - Flat xyz list.
- * @param vertexIndex - Vertex.
- * @returns |p| / a.
- */
-function radiusOf(positionValues: number[], vertexIndex: number): number {
-  const valueIdx = vertexIndex * 3;
-  return Math.hypot(positionValues[valueIdx], positionValues[valueIdx + 1], positionValues[valueIdx + 2]) / WGS84_SEMI_MAJOR;
-}
-
-/** Plate 7 is rotated 30° about the x axis at every age; plate 8 is fixed. */
-const rotationTree = new RotationTree({
-  maxAge: 1000,
-  anchorPlate: 0,
-  plates: { "7": [[0, 0, 0, 0, 0], [1000, 0, 0, 30, 0]], "8": [[0, 90, 0, 0, 0], [1000, 90, 0, 0, 0]] },
-});
-
 const paleoData = parsePaleoMagData({
-  poles: [
-    { poleName: "A", block: "Seven", plateId: 7, youngAgeMa: 100, oldAgeMa: 120, latitudeDeg: 90, longitudeDeg: 0, confidenceDeg: 5 },
-    { poleName: "B", block: "Unmapped", plateId: null, youngAgeMa: 100, oldAgeMa: 120, latitudeDeg: 80, longitudeDeg: 0 },
-    { poleName: "bad", plateId: 7, youngAgeMa: 100, oldAgeMa: 120, latitudeDeg: 95, longitudeDeg: 0 },
-  ],
+  sites: null,
+  platesReady: true,
   tpwPaths: [
     {
       frameKey: "TEST",
@@ -86,8 +55,7 @@ const paleoData = parsePaleoMagData({
 });
 
 // Validation
-assertCheck(paleoData.paleoPoles.length === 2 && paleoData.tpwPaths.length === 1, "invalid poles and paths are dropped");
-assertCheck(paleoData.paleoPoles[0].confidenceDeg === 5 && paleoData.paleoPoles[1].confidenceDeg === null, "confidence radius is optional");
+assertCheck(paleoData.pintSites === null && paleoData.tpwPaths.length === 1, "missing sites are allowed and invalid paths are dropped");
 assertCheck(paleoData.tpwPaths[0].pathPoints.length === 2 && paleoData.tpwPaths[0].pathPoints[0].ageMa === 0, "path points are validated and sorted by age");
 
 // TPW paths: the spin axis is interpolated along the great circle between path poles
@@ -109,18 +77,6 @@ assertCheck(paleoData.tpwPaths[0].pathPoints.length === 2 && paleoData.tpwPaths[
   assertCheck(tpwRateNote([], [], 5) === "", "no rate note without data");
 }
 
-// Poles move with their plate; unmapped blocks are skipped
-{
-  const rotationCache = new RotationCache(rotationTree);
-  const placedPoles = polesAtAge(paleoData.paleoPoles, rotationCache, 110);
-  assertCheck(placedPoles.length === 1 && placedPoles[0].paleoPole.poleName === "A", "only poles of mapped plates inside their window are placed");
-  const expectedNorth: UnitVector = [0, 0, 0];
-  quatRotate(quatFromPole(0, 0, 3.3), 0, 0, 1, expectedNorth);
-  assertCheck(dotProduct(placedPoles[0].northUnit, expectedNorth) > 0.999999, "pole is rotated with its plate at the displayed age");
-  assertCheck(polesAtAge(paleoData.paleoPoles, rotationCache, 130).length === 0, "no poles outside their window");
-  assertCheck(meanPoleAxis([]) === null && meanPoleAxis(placedPoles) !== null, "mean axis needs a pole");
-}
-
 // TPW grid
 {
   const frameQuat = quatFromPole(10, 20, 35);
@@ -134,24 +90,6 @@ assertCheck(paleoData.tpwPaths[0].pathPoints.length === 2 && paleoData.tpwPaths[
   assertCheck(longitudeText(-60) === "60°W" && longitudeText(180) === "180°" && latitudeText(-30) === "30°S", "degree texts");
 }
 
-// Field lines: 24 per shell, leaving the ground in a tube around the north pole, red to blue
-{
-  const spaceLineSet = new SpaceLineSet();
-  const labelRequests: never[] = [];
-  addFieldLines(spaceLineSet, [0, 0, 1], 2, labelRequests);
-  const lineVertices = SAMPLES_PER_LINE * 2 + 4;
-  const tubeVertices = 2 * 2 * 48;
-  assertCheck(spaceLineSet.vertexCount === 2 * (LINES_PER_SHELL * lineVertices + tubeVertices) + 4, "two shells of 24 lines, their tube mouths and the magnet axis");
-  assertCheck(Math.abs(radiusOf(spaceLineSet.positionValues, 0) - 1) < 1e-6, "field line starts on the ground");
-  assertCheck(Math.abs(radiusOf(spaceLineSet.positionValues, SAMPLES_PER_LINE) - FIELD_SHELL_RADII[0]) < 0.01, "field line apex is at the shell radius");
-  const footColatitude = profileForApex(FIELD_SHELL_RADII[0], SAMPLES_PER_LINE).footColatitudeRad;
-  assertCheck(footColatitude < Math.asin(Math.sqrt(1 / FIELD_SHELL_RADII[0])) - 0.2, "lines leave closer to the pole than a central dipole's");
-  assertCheck(profileForApex(FIELD_SHELL_RADII[1], SAMPLES_PER_LINE).footColatitudeRad < footColatitude, "outer layers leave closer to the pole");
-  const lastVertex = SAMPLES_PER_LINE * 2 - 1;
-  assertCheck(spaceLineSet.positionValues[lastVertex * 3 + 2] < 0 && Math.abs(radiusOf(spaceLineSet.positionValues, lastVertex) - 1) < 1e-6, "field line ends on the ground in the south");
-  assertCheck(spaceLineSet.colorValues[0] > spaceLineSet.colorValues[2] && spaceLineSet.colorValues[lastVertex * 4 + 2] > spaceLineSet.colorValues[lastVertex * 4], "field line runs from red to blue");
-}
-
 // Grid lift follows the zoom
 {
   assertCheck(gridLiftScale(GRID_GROUND_HEIGHT_M / 2) < 1.001, "grid lies on the ground below the configured height");
@@ -162,14 +100,9 @@ assertCheck(paleoData.tpwPaths[0].pathPoints.length === 2 && paleoData.tpwPaths[
 // Scene: ticked layers without data draw nothing
 {
   const allLayers: PaleoLayerChoice = { showSpinAxis: true, showPaleoGrid: true, showMagneticPoles: true, showFieldLines: true, tpwFrameKey: "TEST", fieldShellCount: 3 };
-  assertCheck(buildPaleoScene({ tpwFrame: null, placedPoles: [], layerChoice: allLayers }).lineGroups.size === 0, "no data, no lines");
-  const rotationCache = new RotationCache(rotationTree);
-  const fullScene = buildPaleoScene({
-    tpwFrame: new TpwPaths(paleoData.tpwPaths).frameAtAge("TEST", 5),
-    placedPoles: polesAtAge(paleoData.paleoPoles, rotationCache, 110),
-    layerChoice: allLayers,
-  });
-  assertCheck(["paleoGrid", "groundMarks", "spaceLines"].every((groupKey) => fullScene.lineGroups.has(groupKey as never)), "every group is filled with data");
+  assertCheck(buildPaleoScene({ tpwFrame: null, magneticField: null, layerChoice: allLayers }).lineGroups.size === 0, "no data, no lines");
+  const tpwScene = buildPaleoScene({ tpwFrame: new TpwPaths(paleoData.tpwPaths).frameAtAge("TEST", 5), magneticField: null, layerChoice: allLayers });
+  assertCheck(["paleoGrid", "groundMarks", "spaceLines"].every((groupKey) => tpwScene.lineGroups.has(groupKey as never)), "TPW data fills every group");
 }
 
 console.log("All paleomagnetic self-checks passed.");

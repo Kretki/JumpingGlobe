@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from server.build_utils import (
+from server.shared_utils.build_utils import (
     STATUS_BUILDING,
     STATUS_FAILED,
     STATUS_READY,
@@ -23,8 +23,8 @@ from server.build_utils import (
     newest_time,
     run_logged_script,
 )
-from server.lod_config import DATA_DIR, PROJECT_ROOT
-from server.plate_model_config import PLATE_MODEL
+from server.configuration.lod_config import DATA_DIR, PROJECT_ROOT
+from server.configuration.plate_model_config import PLATE_MODEL
 
 
 @dataclass(frozen=True)

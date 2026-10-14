@@ -1,5 +1,5 @@
 /**
- * Paleomagnetic layers: loads the poles and TPW tables once, works out per age which data
+ * Paleomagnetic layers: loads the PINT sites and TPW data, works out per age which data
  * exists (greying out the controls that have none), rebuilds the overlay when the age or the
  * layer choice changes, keeps the TPW grid's lift in step with the zoom and feeds the label board.
  */
@@ -7,7 +7,8 @@
 import { gridLiftScale, groundLiftScale } from "../paleomag/gridLift";
 import type { PaleoMagData } from "../paleomag/paleomagModel";
 import { buildPaleoScene, type PaleoGroup, type PaleoLayerChoice } from "../paleomag/paleoScene";
-import { polesAtAge, type PlacedPole } from "../paleomag/poleSelection";
+import { magneticFieldAt, magneticFieldNote, type MagneticField } from "../paleomag/magneticField";
+import { SITE_SETTINGS } from "../paleomag/siteSettings";
 import { TpwPaths, tpwRateNote, type TpwFrame, type TpwFrameOption } from "../paleomag/tpwPaths";
 import type { RotationTree } from "../plates/rotationTree";
 import { unitToLonLat } from "../plates/sphericalCoords";
@@ -24,6 +25,12 @@ export interface PaleoAvailabilitySink {
   setNotes(tpwNoteText: string, magneticNote: string): void;
 }
 
+/** Plots the dipole moment of the sites through time (FieldStrengthChart). */
+export interface FieldStrengthSink {
+  setSites(siteAges: Float64Array, siteMoments: Float64Array): void;
+  markCurrentAge(ageInMyr: number, windowMomentE22: number): void;
+}
+
 /** Draws the line groups (SpaceLineOverlay). */
 export interface PaleoLineSink {
   uploadGroups(lineGroups: ReadonlyMap<PaleoGroup, SpaceLineData>): void;
@@ -32,11 +39,13 @@ export interface PaleoLineSink {
 }
 
 export type PaleoLayersDeps = {
-  rotationSource: { readonly rotationTree: RotationTree | null };
+  /** Rotation model, and the static-polygon file (the sites' plates are assigned once it exists). */
+  rotationSource: { readonly rotationTree: RotationTree | null; readonly staticFile: string | null };
   ageSource: AgeSource;
   layerChoice: PaleoLayerChoice;
   availabilitySink: PaleoAvailabilitySink;
   lineSink: PaleoLineSink;
+  strengthSink: FieldStrengthSink;
   /** Fetches the paleomagnetic data (fetchPaleoMagData). */
   loadData: () => Promise<PaleoMagData>;
   /** Called when statusNote may have changed. */
@@ -47,13 +56,40 @@ export type PaleoLayersDeps = {
 type LoadedPaleo = { paleoData: PaleoMagData; tpwPaths: TpwPaths };
 
 /** What exists at the displayed age. */
-type AgeData = { ageInMyr: number; rotationTree: RotationTree; tpwFrameKey: string; tpwFrame: TpwFrame | null; placedPoles: PlacedPole[] };
+type AgeData = {
+  loadedPaleo: LoadedPaleo;
+  ageInMyr: number;
+  rotationTree: RotationTree;
+  tpwFrameKey: string;
+  tpwFrame: TpwFrame | null;
+  magneticField: MagneticField | null;
+};
 
-const MAX_LISTED_POLES = 4;
+/**
+ * Note under the TPW checkboxes.
+ *
+ * Usage: refreshAge.
+ *
+ * @param loadedPaleo - Loaded data.
+ * @param tpwFrameKey - Chosen path.
+ * @param tpwFrame - Spin axis at the age, or null.
+ * @param ageInMyr - Displayed age.
+ * @returns Spin-axis position (or why there is none) and the rates.
+ */
+function tpwNoteText(loadedPaleo: LoadedPaleo, tpwFrameKey: string, tpwFrame: TpwFrame | null, ageInMyr: number): string {
+  const coveredSpan = loadedPaleo.tpwPaths.coveredSpan(tpwFrameKey);
+  const spanText = coveredSpan ? `path ${coveredSpan[0].toFixed(0)}–${coveredSpan[1].toFixed(0)} Ma` : "no TPW path";
+  const [axisLongitude, axisLatitude] = tpwFrame ? unitToLonLat(tpwFrame.spinAxisUnit) : [0, 0];
+  const frameText = tpwFrame ? `Spin axis ${axisLatitude.toFixed(1)}°N ${axisLongitude.toFixed(1)}°E (${spanText})` : `No TPW pole at ${ageInMyr} Ma (${spanText})`;
+  const rateText = tpwRateNote(loadedPaleo.paleoData.tpwRates, loadedPaleo.paleoData.tpwNetAngles, ageInMyr);
+  return [frameText, rateText].filter(Boolean).join(" · ");
+}
 
 export class PaleoLayersController implements LabelProvider {
   private loadedPaleo: LoadedPaleo | null = null;
-  private loadState: "idle" | "loading" | "failed" = "idle";
+  private loadState: "idle" | "loading" | "loaded" | "failed" = "idle";
+  /** The data was fetched again after the server assigned the sites' plates. */
+  private reloadedWithPlates = false;
   private currentAgeData: AgeData | null = null;
   private sceneKey = "";
   private hasScene = false;
@@ -105,21 +141,28 @@ export class PaleoLayersController implements LabelProvider {
   }
 
   /**
-   * Fetch the data once.
+   * Fetch the data once, and once more when the server can assign the sites' plates.
    *
-   * Usage: first frame.
+   * Usage: every frame (cheap when nothing to do).
    *
    * @returns Nothing; the data arrives asynchronously.
    */
   private ensureLoaded(): void {
+    const platesPending = this.loadState === "loaded" && !this.loadedPaleo?.paleoData.platesReady;
+    if (platesPending && !this.reloadedWithPlates && this.paleoDeps.rotationSource.staticFile) {
+      this.reloadedWithPlates = true;
+      this.loadState = "idle";
+    }
     if (this.loadState !== "idle") return;
     this.loadState = "loading";
     this.paleoDeps
       .loadData()
       .then((paleoData) => {
         const tpwPaths = new TpwPaths(paleoData.tpwPaths);
-        this.paleoDeps.availabilitySink.setTpwFrameOptions(tpwPaths.frameOptions);
+        if (!this.loadedPaleo) this.paleoDeps.availabilitySink.setTpwFrameOptions(tpwPaths.frameOptions);
+        if (paleoData.pintSites) this.paleoDeps.strengthSink.setSites(paleoData.pintSites.ageMa, paleoData.pintSites.momentE22);
         this.loadedPaleo = { paleoData, tpwPaths };
+        this.loadState = "loaded";
       })
       .catch((caughtError) => {
         console.warn("paleomagnetic data unavailable", caughtError);
@@ -140,23 +183,15 @@ export class PaleoLayersController implements LabelProvider {
    * @returns The data of the age.
    */
   private refreshAge(loadedPaleo: LoadedPaleo, rotationTree: RotationTree, ageInMyr: number, tpwFrameKey: string): AgeData {
-    const rotationCache = new RotationCache(rotationTree);
     const tpwFrame = loadedPaleo.tpwPaths.frameAtAge(tpwFrameKey, ageInMyr);
-    const placedPoles = polesAtAge(loadedPaleo.paleoData.paleoPoles, rotationCache, ageInMyr);
-    this.paleoDeps.availabilitySink.setAvailability(tpwFrame !== null, placedPoles.length > 0);
-    const coveredSpan = loadedPaleo.tpwPaths.coveredSpan(tpwFrameKey);
-    const spanText = coveredSpan ? `path ${coveredSpan[0].toFixed(0)}–${coveredSpan[1].toFixed(0)} Ma` : "no TPW path";
-    const [axisLongitude, axisLatitude] = tpwFrame ? unitToLonLat(tpwFrame.spinAxisUnit) : [0, 0];
-    const frameText = tpwFrame
-      ? `Spin axis ${axisLatitude.toFixed(1)}°N ${axisLongitude.toFixed(1)}°E (${spanText})`
-      : `No TPW pole at ${ageInMyr} Ma (${spanText})`;
-    const rateText = tpwRateNote(loadedPaleo.paleoData.tpwRates, loadedPaleo.paleoData.tpwNetAngles, ageInMyr);
-    const poleNames = placedPoles.map((placedPole) => placedPole.paleoPole.poleName);
-    const poleText = poleNames.length
-      ? `Poles: ${poleNames.slice(0, MAX_LISTED_POLES).join(", ")}${poleNames.length > MAX_LISTED_POLES ? ` +${poleNames.length - MAX_LISTED_POLES}` : ""}`
-      : `No paleomagnetic pole at ${ageInMyr} Ma`;
-    this.paleoDeps.availabilitySink.setNotes([frameText, rateText].filter(Boolean).join(" · "), poleText);
-    return { ageInMyr, rotationTree, tpwFrameKey, tpwFrame, placedPoles };
+    const pintSites = loadedPaleo.paleoData.pintSites;
+    const magneticField = pintSites ? magneticFieldAt(pintSites, new RotationCache(rotationTree), ageInMyr, SITE_SETTINGS) : null;
+    const magneticNote = magneticField ? magneticFieldNote(magneticField, ageInMyr) : "No PINT data";
+    const platesNote = loadedPaleo.paleoData.platesReady || ageInMyr <= 0 ? "" : " · waiting for plate polygons";
+    this.paleoDeps.availabilitySink.setAvailability(tpwFrame !== null, (magneticField?.magneticPoles.length ?? 0) > 0);
+    this.paleoDeps.availabilitySink.setNotes(tpwNoteText(loadedPaleo, tpwFrameKey, tpwFrame, ageInMyr), magneticNote + platesNote);
+    this.paleoDeps.strengthSink.markCurrentAge(ageInMyr, magneticField?.windowMomentE22 ?? NaN);
+    return { loadedPaleo, ageInMyr, rotationTree, tpwFrameKey, tpwFrame, magneticField };
   }
 
   /**
@@ -168,7 +203,7 @@ export class PaleoLayersController implements LabelProvider {
    * @returns Nothing.
    */
   private rebuildScene(currentAgeData: AgeData): void {
-    const paleoScene = buildPaleoScene({ tpwFrame: currentAgeData.tpwFrame, placedPoles: currentAgeData.placedPoles, layerChoice: this.paleoDeps.layerChoice });
+    const paleoScene = buildPaleoScene({ tpwFrame: currentAgeData.tpwFrame, magneticField: currentAgeData.magneticField, layerChoice: this.paleoDeps.layerChoice });
     this.paleoDeps.lineSink.uploadGroups(paleoScene.lineGroups);
     this.hasScene = paleoScene.lineGroups.size > 0;
     this.gridLabels = paleoScene.gridLabels;
@@ -191,7 +226,8 @@ export class PaleoLayersController implements LabelProvider {
     const ageInMyr = this.paleoDeps.ageSource.currentAgeMa;
     const tpwFrameKey = this.paleoDeps.layerChoice.tpwFrameKey;
     const previousData = this.currentAgeData;
-    if (!previousData || previousData.ageInMyr !== ageInMyr || previousData.rotationTree !== rotationTree || previousData.tpwFrameKey !== tpwFrameKey) {
+    const ageChanged = !previousData || previousData.ageInMyr !== ageInMyr || previousData.loadedPaleo !== loadedPaleo;
+    if (ageChanged || previousData.rotationTree !== rotationTree || previousData.tpwFrameKey !== tpwFrameKey) {
       this.currentAgeData = this.refreshAge(loadedPaleo, rotationTree, ageInMyr, tpwFrameKey);
       this.sceneKey = "";
     }

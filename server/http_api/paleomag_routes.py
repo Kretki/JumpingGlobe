@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Response
 
-from server.route_support import RouteDependencies, json_response
+from server.http_api.route_support import RouteDependencies, json_response
 
 
 def register_paleomag_routes(api_router: APIRouter, dependencies: RouteDependencies) -> None:
@@ -27,13 +27,13 @@ def register_paleomag_routes(api_router: APIRouter, dependencies: RouteDependenc
 
     @api_router.get("/paleomag")
     def paleomag_data() -> Response:
-        """Paleomagnetic poles, TPW paths and TPW rates (lod.json paleoMagnetics).
+        """PINT sites (VGPs, moments, plates), TPW paths and TPW rates (lod.json paleoMagnetics).
 
         Usage:
             ``GET /api/paleomag`` once at start-up; the client decides per age what is shown.
 
         Returns:
-            JSON ``{"version", "poles", "tpwPaths", "tpwRates", "tpwNetAngles", "skippedRows"}``;
+            JSON ``{"version", "sites", "platesReady", "tpwPaths", "tpwRates", "tpwNetAngles"}``;
             404 when the tables are not configured or missing.
         """
         if not paleomag_responder.is_available():

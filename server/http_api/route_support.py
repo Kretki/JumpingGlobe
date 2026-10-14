@@ -8,7 +8,7 @@ from typing import NoReturn
 
 from fastapi import HTTPException, Response
 
-from server.service_contracts import (
+from server.contracts.service_contracts import (
     LandResponder,
     PaleoMagResponder,
     PlateLayerStatus,
