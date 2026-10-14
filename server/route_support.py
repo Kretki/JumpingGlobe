@@ -10,6 +10,7 @@ from fastapi import HTTPException, Response
 
 from server.service_contracts import (
     LandResponder,
+    PaleoMagResponder,
     PlateLayerStatus,
     RotationResponder,
     TopologyResponder,
@@ -31,6 +32,7 @@ class RouteDependencies:
     plate_status: PlateLayerStatus
     topology_status: TopologyStatus
     topology_responder: TopologyResponder
+    paleomag_responder: PaleoMagResponder
     world_file: str
     data_directory_label: str
     full_resolution_path: Path

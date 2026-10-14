@@ -1,6 +1,7 @@
 """HTTP routes of the land GeoPackage API (thin layer: validate, delegate, map errors to status codes).
 
-Plate-model routes (health, rotations, plate status, topologies, stats) live in server/plate_routes.py.
+Plate-model routes (health, rotations, plate status, topologies, stats) live in server/plate_routes.py,
+the paleomagnetic route in server/paleomag_routes.py.
 
   GET /api/land?file=<worldFile from lod.json>&bbox=west,south,east,north&limit=25000&min_area=0
   GET /api/land/past?file=<plate twin>&age=<Ma>&lon=&lat=&radius=&limit=&min_area=
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from server.paleomag_routes import register_paleomag_routes
 from server.plate_routes import register_status_routes, register_topology_routes
 from server.request_parsing import parse_bbox
 from server.route_support import (
@@ -37,6 +39,7 @@ def build_api_router(dependencies: RouteDependencies) -> APIRouter:
     api_router = APIRouter(prefix="/api")
     register_status_routes(api_router, dependencies)
     register_topology_routes(api_router, dependencies)
+    register_paleomag_routes(api_router, dependencies)
     _register_land_routes(api_router, dependencies)
     return api_router
 

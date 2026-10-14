@@ -4,11 +4,14 @@ import { writeSurfacePoint } from "../geodesy/wgs84Ellipsoid";
 import type { UnitVector } from "../plates/sphericalCoords";
 import type { Matrix4x4 } from "./matrixMath";
 
-/** Visual kind of a label (CSS modifier): plain plate name or a tectonic annotation. */
-export type LabelStyle = "plate" | "subducting" | "appear" | "vanish";
+/** Visual kind of a label (CSS modifier): plate name, tectonic annotation or paleomagnetic annotation. */
+export type LabelStyle = "plate" | "subducting" | "appear" | "vanish" | "graticule" | "spinAxis" | "magneticNorth" | "magneticSouth";
 
-/** A label to place: text, its direction on the GPlates sphere and its style (default "plate"). */
-export type LabelRequest = { labelText: string; labelUnit: UnitVector; labelStyle?: LabelStyle };
+/**
+ * A label to place: text, its direction on the GPlates sphere, its style (default "plate")
+ * and, for labels above the ground, the distance factor of their anchor (default 1 = ground).
+ */
+export type LabelRequest = { labelText: string; labelUnit: UnitVector; labelStyle?: LabelStyle; labelLift?: number };
 
 /** A placed label: text, style and the CSS-pixel position of its centre. */
 export type PlacedLabel = { labelText: string; labelStyle: LabelStyle; screenX: number; screenY: number };
@@ -36,7 +39,7 @@ const MIN_FACING_COSINE = 0.15;
  *
  * Usage: skip labels on the far side of the globe and on its limb.
  *
- * @param surfacePoint - ECEF position in metres.
+ * @param surfacePoint - ECEF position in metres (on or above the ground).
  * @param surfaceNormal - Unit direction of the point (≈ ellipsoid normal).
  * @param eyePosition - Camera position (ECEF).
  * @returns True when the angle between normal and view direction is small enough.
@@ -129,6 +132,7 @@ export function placeLabels(labelRequests: LabelRequest[], labelView: LabelView)
   for (const labelRequest of labelRequests) {
     if (placedLabels.length >= MAX_PLACED_LABELS) break;
     writeSurfacePoint(labelRequest.labelUnit, surfacePoint, 0);
+    if (labelRequest.labelLift) for (let axisIndex = 0; axisIndex < 3; axisIndex++) surfacePoint[axisIndex] *= labelRequest.labelLift;
     if (!facesCamera(surfacePoint, labelRequest.labelUnit, labelView.eyePosition)) continue;
     const screenPoint = projectToScreen(surfacePoint, labelView);
     if (!screenPoint) continue;

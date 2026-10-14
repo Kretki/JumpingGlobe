@@ -621,6 +621,7 @@ name = "jumping-globe"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "defusedxml" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -641,6 +642,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "defusedxml", specifier = ">=0.7.1,<0.8" },
     { name = "defusedxml", marker = "extra == 'tools'", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "gdal", marker = "extra == 'tools'", specifier = ">=3.13.0" },

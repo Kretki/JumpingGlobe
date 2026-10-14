@@ -2,6 +2,7 @@
 
 import { requireElement } from "./domLookup";
 import { LandProgressPanel } from "./landProgressPanel";
+import { PaleoLayerControls } from "./paleoLayerControls";
 import { PlateDisplayControls } from "./plateDisplayControls";
 import { PlateEventsPanel } from "./plateEventsPanel";
 import { PlateLabelLayer } from "./plateLabelLayer";
@@ -134,4 +135,28 @@ export function createTectonicLayerControls(onChange: () => void): TectonicLayer
  */
 export function createPlateEventsPanel(): PlateEventsPanel {
   return new PlateEventsPanel(requireElement("plate-events", HTMLUListElement));
+}
+
+/**
+ * Create the paleomagnetic layer controls.
+ *
+ * Usage: start-up.
+ *
+ * @param onChange - Called when any of them changes.
+ * @returns The controls.
+ */
+export function createPaleoLayerControls(onChange: () => void): PaleoLayerControls {
+  return new PaleoLayerControls(
+    {
+      spinAxisCheckbox: requireElement("pm-tpw-poles", HTMLInputElement),
+      paleoGridCheckbox: requireElement("pm-tpw-grid", HTMLInputElement),
+      tpwFrameSelect: requireElement("pm-tpw-frame", HTMLSelectElement),
+      magneticPolesCheckbox: requireElement("pm-mag-poles", HTMLInputElement),
+      fieldLinesCheckbox: requireElement("pm-field-lines", HTMLInputElement),
+      shellCountSelect: requireElement("pm-field-shells", HTMLSelectElement),
+      tpwNoteElement: requireElement("pm-tpw-note", HTMLElement),
+      magneticNoteElement: requireElement("pm-mag-note", HTMLElement),
+    },
+    onChange
+  );
 }

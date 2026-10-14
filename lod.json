@@ -18,6 +18,57 @@
     ],
     "topologyScript": "public/external/cao_topologies.sh"
   },
+  "paleoMagnetics": {
+    "sourceDir": "public/external",
+    "poleFiles": [
+      { "file": "paleomagnetic_poles/south_china_phanerozoic_poles.csv", "block": "South China" },
+      { "file": "paleomagnetic_poles/south_china_neoproterozoic_poles.csv", "block": "South China" },
+      { "file": "paleomagnetic_poles/rodinia_850_810_poles.csv" }
+    ],
+    "tpwWorkbook": {
+      "file": "tpw/input_APWP.xlsx",
+      "pathSheet": "TPWPs",
+      "ageColumn": "age",
+      "confidenceColumn": "P95",
+      "frames": [
+        { "key": "M22", "label": "M22 mantle frame (0–320 Ma)", "lonColumn": "lon_M22", "latColumn": "lat_M22" },
+        { "key": "D12", "label": "D12 mantle frame (0–120 Ma)", "lonColumn": "lon_D12", "latColumn": "lat_D12" },
+        { "key": "T08", "label": "T08 mantle frame (0–120 Ma)", "lonColumn": "lon_T08", "latColumn": "lat_T08" },
+        { "key": "M93", "label": "M93 mantle frame (0–120 Ma)", "lonColumn": "lon_M93", "latColumn": "lat_M93" },
+        { "key": "D12_TPWP", "label": "D12 published TPW path (0–120 Ma)", "lonColumn": "lon_D12_TPWP", "latColumn": "lat_D12_TPWP" }
+      ],
+      "rateSheet": "V23_int",
+      "rateColumn": "PW_rate",
+      "rateLowColumn": "PW_rate_low",
+      "rateHighColumn": "PW_rate_high"
+    },
+    "tpwNetAngleFile": "tpw/rates_T14.csv",
+    "blockPlateIds": { "South China": 602, "Laurentia": 101, "Baltica": 302, "East Svalbard": 311, "West Africa": 714 },
+    "namedAgesMa": {
+      "Cenozoic": [0, 66.0],
+      "Late Cretaceous": [66.0, 100.5],
+      "Early Cretaceous": [100.5, 145.0],
+      "Late Jurassic": [145.0, 161.5],
+      "Middle Jurassic": [161.5, 174.7],
+      "Early Jurassic": [174.7, 201.4],
+      "Late Triassic": [201.4, 237.0],
+      "Middle Triassic": [237.0, 247.2],
+      "Early Triassic": [247.2, 251.9],
+      "Permian - Guadalupian & Lopingian": [251.9, 273.0],
+      "Permian - Cisuralian": [273.0, 298.9],
+      "Carboniferous - Mississippian": [323.2, 358.9],
+      "Late Devonian": [358.9, 382.7],
+      "Middle Devonian - Givetian": [382.7, 387.7],
+      "Early & Middle Devonian": [382.7, 419.2],
+      "Siurian - Wenlock & Ludlow": [423.0, 433.4],
+      "Middle & Late Ordovician": [443.8, 470.0],
+      "Early Ordovician": [470.0, 485.4],
+      "Cambrian - Series 2": [509.0, 521.0]
+    },
+    "minAgeWindowMyr": 2,
+    "gridGroundHeightM": 2500000,
+    "gridLiftFraction": 0.05
+  },
   "bands": [
     { "file": "land_lod0.gpkg", "orderNum": 0, "maxEdgeM": 150000, "maxBoundaryEdgeM": 150000 },
     { "file": "land_lod1.gpkg", "orderNum": 1, "maxEdgeM": 80000, "maxBoundaryEdgeM": 80000 },

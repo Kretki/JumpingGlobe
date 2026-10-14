@@ -31,6 +31,8 @@ from server.api_routes import build_api_router
 from server.gpkg_store import GeoPackageStore
 from server.land_queries import LandQueryEngine
 from server.lod_config import DATA_DIR, FULL_RESOLUTION_FILE, PROJECT_ROOT, WORLD_FILE
+from server.paleomag_config import PALEO_MAGNETICS
+from server.paleomag_service import PaleoMagService
 from server.plate_layer_paths import default_plate_layer_paths
 from server.plate_layers import PlateLayerBuilder
 from server.plate_model_config import PLATE_MODEL
@@ -126,6 +128,7 @@ def create_application() -> FastAPI:
                 plate_status=plate_builder,
                 topology_status=topology_builder,
                 topology_responder=TopologyFileService(topology_builder.topology_path),
+                paleomag_responder=PaleoMagService(PALEO_MAGNETICS),
                 world_file=WORLD_FILE,
                 data_directory_label=project_relative(DATA_DIR),
                 full_resolution_path=DATA_DIR / FULL_RESOLUTION_FILE,

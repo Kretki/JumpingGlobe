@@ -218,7 +218,8 @@ function renderFrame(globeApp: GlobeApplication, deltaSeconds: number): void {
 
   const aspectRatio = globeApp.canvasElement.width / globeApp.canvasElement.height;
   const nearPlane = Math.max(1, orbitCamera.heightMeters * 0.05);
-  const farPlane = orbitCamera.heightMeters + WGS84_SEMI_MAJOR * 4;
+  // Deep enough for the outermost magnetic field lines behind the globe (≈ 3.9 Earth radii).
+  const farPlane = orbitCamera.heightMeters + WGS84_SEMI_MAJOR * 10;
   const projectionMatrix = mat4Perspective(FIELD_OF_VIEW_Y, aspectRatio, nearPlane, farPlane);
   const viewMatrix = mat4LookAt(eyePosition, [0, 0, 0], orbitCamera.upVector());
   const modelMatrix = mat4Identity();

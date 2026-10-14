@@ -1,5 +1,6 @@
 /** Typed, validated access to the non-land API endpoints. */
 
+import { parsePaleoMagData, type PaleoMagData } from "../paleomag/paleomagModel";
 import type { RotationModel } from "../plates/rotationTree";
 import { parsePlateOutlines, type PlateOutline } from "../plates/plateOutlines";
 import { parseStaticPolygons, type StaticFeatureCollection, type StaticPolygon } from "../plates/staticPolygons";
@@ -170,4 +171,16 @@ export async function fetchPlateOutlines(outlinesFile: string): Promise<PlateOut
  */
 export async function fetchPlateTopologies(): Promise<TopologyModel> {
   return parseTopologyModel(await fetchJson("/plates/topologies"));
+}
+
+/**
+ * Load the paleomagnetic poles and true-polar-wander tables.
+ *
+ * Usage: once, on the first frame (the paleomagnetic controls stay greyed out until it arrives).
+ *
+ * @returns The validated data.
+ * @throws Error when the request fails or the body is not paleomagnetic data.
+ */
+export async function fetchPaleoMagData(): Promise<PaleoMagData> {
+  return parsePaleoMagData(await fetchJson("/paleomag"));
 }

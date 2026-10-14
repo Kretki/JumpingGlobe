@@ -82,3 +82,24 @@ void main() {
   gl_FragColor = uFillColor;
 }
 `;
+
+/** Coloured 3-D lines (paleomagnetic overlay): ECEF positions scaled radially per draw call. */
+export const SPACE_LINE_VERTEX_SHADER = `
+attribute vec3 aLinePos;
+attribute vec4 aLineColor;
+uniform mat4 uModelViewProj;
+uniform float uRadialScale;
+varying vec4 vLineColor;
+void main() {
+  gl_Position = uModelViewProj * vec4(aLinePos * uRadialScale, 1.0);
+  vLineColor = aLineColor;
+}
+`;
+
+export const SPACE_LINE_FRAGMENT_SHADER = `
+precision mediump float;
+varying vec4 vLineColor;
+void main() {
+  gl_FragColor = vLineColor;
+}
+`;

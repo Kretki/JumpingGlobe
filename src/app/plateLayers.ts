@@ -1,18 +1,28 @@
 /**
  * Wiring of the optional plate layers drawn over the globe: the static-polygon
  * outlines with plate names, the tectonic layers (boundaries, motion, subducting
- * plates, events) and the shared label board.
+ * plates, events), the paleomagnetic layers (TPW poles and grid, magnetic poles and
+ * field lines) and the shared label board.
  */
 
 import type { RotationTree } from "../plates/rotationTree";
 import type { LabelView } from "../rendering/labelPlacement";
 import type { Matrix4x4 } from "../rendering/matrixMath";
+import type { PaleoGroup } from "../paleomag/paleoScene";
 import { PlateOutlineOverlay } from "../rendering/plateOutlineOverlay";
+import { SpaceLineOverlay } from "../rendering/spaceLineOverlay";
 import { TectonicOverlay } from "../rendering/tectonicOverlay";
-import { createPlateDisplayControls, createPlateEventsPanel, createPlateLabelLayer, createTectonicLayerControls } from "../ui/panelFactories";
+import {
+  createPaleoLayerControls,
+  createPlateDisplayControls,
+  createPlateEventsPanel,
+  createPlateLabelLayer,
+  createTectonicLayerControls,
+} from "../ui/panelFactories";
 import type { AgeSource } from "../ui/timelineControl";
-import { fetchPlateOutlines, fetchPlateTopologies } from "./globeApi";
+import { fetchPaleoMagData, fetchPlateOutlines, fetchPlateTopologies } from "./globeApi";
 import { LabelBoard } from "./labelBoard";
+import { PaleoLayersController } from "./paleoLayersController";
 import { PlateOutlineController } from "./plateOutlineController";
 import { TectonicsController } from "./tectonicsController";
 
@@ -36,8 +46,44 @@ export type PlateLayers = {
   plateOutlines: PlateOutlineController;
   tectonicOverlay: TectonicOverlay;
   tectonics: TectonicsController;
+  paleoOverlay: SpaceLineOverlay<PaleoGroup>;
+  paleoLayers: PaleoLayersController;
   labelBoard: LabelBoard;
 };
+
+/** Drawing order of the paleomagnetic line groups. */
+const PALEO_GROUP_ORDER: readonly PaleoGroup[] = ["groundMarks", "paleoGrid", "spaceLines"];
+
+/**
+ * Create the paleomagnetic layers with their controls.
+ *
+ * Usage: createPlateLayers.
+ *
+ * @param paleoOverlay - Overlay the layers draw into.
+ * @param layerSource - Rotation model.
+ * @param ageSource - Displayed age.
+ * @param onStatusChange - Refreshes the timeline status line.
+ * @returns The controller.
+ */
+function createPaleoLayers(
+  paleoOverlay: SpaceLineOverlay<PaleoGroup>,
+  layerSource: PlateLayerSource,
+  ageSource: AgeSource,
+  onStatusChange: () => void
+): PaleoLayersController {
+  let paleoLayers: PaleoLayersController | null = null;
+  const paleoControls = createPaleoLayerControls(() => paleoLayers?.handleLayerChange());
+  paleoLayers = new PaleoLayersController({
+    rotationSource: layerSource,
+    ageSource,
+    layerChoice: paleoControls,
+    availabilitySink: paleoControls,
+    lineSink: paleoOverlay,
+    loadData: fetchPaleoMagData,
+    onStatusChange,
+  });
+  return paleoLayers;
+}
 
 /**
  * Create the outline and tectonic layers with their controls.
@@ -80,8 +126,10 @@ export function createPlateLayers(
     loadTopologies: fetchPlateTopologies,
     onStatusChange,
   });
-  const labelBoard = new LabelBoard([tectonics, plateOutlines], createPlateLabelLayer());
-  return { outlineOverlay, plateOutlines, tectonicOverlay, tectonics, labelBoard };
+  const paleoOverlay = new SpaceLineOverlay<PaleoGroup>(glContext, globeProgram, normalAttribute, PALEO_GROUP_ORDER);
+  const paleoLayers = createPaleoLayers(paleoOverlay, layerSource, ageSource, onStatusChange);
+  const labelBoard = new LabelBoard([paleoLayers, tectonics, plateOutlines], createPlateLabelLayer());
+  return { outlineOverlay, plateOutlines, tectonicOverlay, tectonics, paleoOverlay, paleoLayers, labelBoard };
 }
 
 /**
@@ -96,6 +144,7 @@ export function createPlateLayers(
 export function updatePlateLayers(plateLayers: PlateLayers, cameraHeightM: number): void {
   plateLayers.plateOutlines.updateFrame();
   plateLayers.tectonics.updateFrame(cameraHeightM);
+  plateLayers.paleoLayers.updateFrame(cameraHeightM);
 }
 
 /**
@@ -112,6 +161,7 @@ export function updatePlateLayers(plateLayers: PlateLayers, cameraHeightM: numbe
 export function drawPlateLayers(plateLayers: PlateLayers, modelViewProj: Matrix4x4, cameraHeightM: number, labelView: LabelView): void {
   if (plateLayers.plateOutlines.isShowing) plateLayers.outlineOverlay.drawOutlines(modelViewProj, cameraHeightM);
   if (plateLayers.tectonics.isShowing) plateLayers.tectonicOverlay.drawScene(modelViewProj, cameraHeightM);
+  if (plateLayers.paleoLayers.isShowing) plateLayers.paleoOverlay.drawLines(modelViewProj);
   plateLayers.labelBoard.renderFrame(labelView);
 }
 
@@ -124,5 +174,5 @@ export function drawPlateLayers(plateLayers: PlateLayers, modelViewProj: Matrix4
  * @returns Notes joined by " · " ("" when there is nothing to report).
  */
 export function plateLayersNote(plateLayers: PlateLayers): string {
-  return [plateLayers.plateOutlines.statusNote, plateLayers.tectonics.statusNote].filter(Boolean).join(" · ");
+  return [plateLayers.plateOutlines.statusNote, plateLayers.tectonics.statusNote, plateLayers.paleoLayers.statusNote].filter(Boolean).join(" · ");
 }

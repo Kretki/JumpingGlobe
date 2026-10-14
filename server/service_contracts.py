@@ -104,3 +104,15 @@ class TopologyResponder(Protocol):
     def topology_json(self) -> bytes | None:
         """Return the model JSON, or None while it is not ready."""
         ...
+
+
+class PaleoMagResponder(Protocol):
+    """Serves the paleomagnetic poles and true-polar-wander data."""
+
+    def is_available(self) -> bool:
+        """Tell whether the configured tables exist."""
+        ...
+
+    def paleomag_json(self) -> bytes:
+        """Return the encoded paleomagnetic data."""
+        ...

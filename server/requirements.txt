@@ -12,6 +12,8 @@ click==8.4.2
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
     # via click
+defusedxml==0.7.1
+    # via jumping-globe
 fastapi==0.141.1
     # via jumping-globe
 h11==0.16.0
