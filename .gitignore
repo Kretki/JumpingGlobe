@@ -79,3 +79,6 @@ public/external/tpw/*
 
 #Python runtime files
 *.pyc
+
+#Downloaded source archives (public/fetch_sources.sh)
+public/data/downloads/
